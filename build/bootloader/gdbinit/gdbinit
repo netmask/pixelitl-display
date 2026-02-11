@@ -1,0 +1,2 @@
+source /Users/netmask/Projects/pixelitl-display/build/bootloader/gdbinit/symbols
+source /Users/netmask/Projects/pixelitl-display/build/bootloader/gdbinit/connect

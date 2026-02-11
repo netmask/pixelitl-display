@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pixelitl Simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #ccc; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 13px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 16px; }
+h1 { font-size: 16px; color: #888; margin-bottom: 12px; font-weight: 400; letter-spacing: 2px; }
+.controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; justify-content: center; }
+.controls select, .controls button { background: #1a1a1a; color: #ccc; border: 1px solid #333; padding: 6px 12px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+.controls select:hover, .controls button:hover { border-color: #555; }
+.controls button.active { border-color: #0af; color: #0af; }
+#face-tabs { display: flex; gap: 4px; }
+#face-tabs .tab { padding: 4px 10px; border-radius: 3px; cursor: pointer; background: #1a1a1a; border: 1px solid #333; }
+#face-tabs .tab.active { background: #0af; color: #000; border-color: #0af; }
+#fps { color: #0af; min-width: 80px; text-align: right; }
+#canvas-wrap { position: relative; margin-bottom: 12px; }
+canvas { display: block; border: 1px solid #222; border-radius: 4px; image-rendering: pixelated; }
+#drop-overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,170,255,0.15); border: 2px dashed #0af; border-radius: 4px; font-size: 18px; color: #0af; pointer-events: none; }
+.panels { display: flex; gap: 12px; width: 100%; max-width: 820px; }
+.panel { flex: 1; background: #111; border: 1px solid #222; border-radius: 4px; padding: 8px; max-height: 200px; overflow-y: auto; }
+.panel h3 { font-size: 11px; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+.panel pre { font-size: 11px; white-space: pre-wrap; word-break: break-all; color: #888; }
+#stats-content { font-size: 11px; line-height: 1.6; }
+#stats-content .val { color: #0af; }
+#file-input { display: none; }
+</style>
+</head>
+<body>
+
+<h1>PIXELITL SIMULATOR</h1>
+
+<div class="controls">
+    <div id="face-tabs"></div>
+    <select id="glow-mode">
+        <option value="flat">Flat</option>
+        <option value="grid" selected>Grid (LED gap)</option>
+        <option value="glow">Soft Glow</option>
+    </select>
+    <button id="btn-load">Load .wasm</button>
+    <input type="file" id="file-input" accept=".wasm" multiple>
+    <span id="fps">-- FPS</span>
+</div>
+
+<div id="canvas-wrap">
+    <canvas id="display" width="800" height="480"></canvas>
+    <div id="drop-overlay">Drop .wasm here</div>
+</div>
+
+<div class="panels">
+    <div class="panel">
+        <h3>Console</h3>
+        <pre id="console-output"></pre>
+    </div>
+    <div class="panel">
+        <h3>Stats</h3>
+        <div id="stats-content"></div>
+    </div>
+</div>
+
+<script>
+// === Pixelitl Simulator ===
+
+const VFB_W = 80, VFB_H = 48, SCALE = 10;
+const LCD_W = 800, LCD_H = 480;
+
+// Virtual framebuffer (RGB565)
+const vfb = new Uint16Array(VFB_W * VFB_H);
+
+// Canvas setup
+const canvas = document.getElementById('display');
+const ctx = canvas.getContext('2d');
+const imageData = ctx.createImageData(LCD_W, LCD_H);
+const pixels = new Uint32Array(imageData.data.buffer);
+
+// ---- 5x7 Font (column-major, same as font5x7.h) ----
+const FONT_5X7 = [
+[0x00,0x00,0x00,0x00,0x00],[0x00,0x00,0x5F,0x00,0x00],[0x00,0x07,0x00,0x07,0x00],
+[0x14,0x7F,0x14,0x7F,0x14],[0x24,0x2A,0x7F,0x2A,0x12],[0x23,0x13,0x08,0x64,0x62],
+[0x36,0x49,0x55,0x22,0x50],[0x00,0x05,0x03,0x00,0x00],[0x00,0x1C,0x22,0x41,0x00],
+[0x00,0x41,0x22,0x1C,0x00],[0x14,0x08,0x3E,0x08,0x14],[0x08,0x08,0x3E,0x08,0x08],
+[0x00,0x50,0x30,0x00,0x00],[0x08,0x08,0x08,0x08,0x08],[0x00,0x60,0x60,0x00,0x00],
+[0x20,0x10,0x08,0x04,0x02],[0x3E,0x51,0x49,0x45,0x3E],[0x00,0x42,0x7F,0x40,0x00],
+[0x42,0x61,0x51,0x49,0x46],[0x21,0x41,0x45,0x4B,0x31],[0x18,0x14,0x12,0x7F,0x10],
+[0x27,0x45,0x45,0x45,0x39],[0x3C,0x4A,0x49,0x49,0x30],[0x01,0x71,0x09,0x05,0x03],
+[0x36,0x49,0x49,0x49,0x36],[0x06,0x49,0x49,0x29,0x1E],[0x00,0x36,0x36,0x00,0x00],
+[0x00,0x56,0x36,0x00,0x00],[0x08,0x14,0x22,0x41,0x00],[0x14,0x14,0x14,0x14,0x14],
+[0x00,0x41,0x22,0x14,0x08],[0x02,0x01,0x51,0x09,0x06],[0x32,0x49,0x79,0x41,0x3E],
+[0x7E,0x11,0x11,0x11,0x7E],[0x7F,0x49,0x49,0x49,0x36],[0x3E,0x41,0x41,0x41,0x22],
+[0x7F,0x41,0x41,0x22,0x1C],[0x7F,0x49,0x49,0x49,0x41],[0x7F,0x09,0x09,0x09,0x01],
+[0x3E,0x41,0x49,0x49,0x7A],[0x7F,0x08,0x08,0x08,0x7F],[0x00,0x41,0x7F,0x41,0x00],
+[0x20,0x40,0x41,0x3F,0x01],[0x7F,0x08,0x14,0x22,0x41],[0x7F,0x40,0x40,0x40,0x40],
+[0x7F,0x02,0x0C,0x02,0x7F],[0x7F,0x04,0x08,0x10,0x7F],[0x3E,0x41,0x41,0x41,0x3E],
+[0x7F,0x09,0x09,0x09,0x06],[0x3E,0x41,0x51,0x21,0x5E],[0x7F,0x09,0x19,0x29,0x46],
+[0x46,0x49,0x49,0x49,0x31],[0x01,0x01,0x7F,0x01,0x01],[0x3F,0x40,0x40,0x40,0x3F],
+[0x1F,0x20,0x40,0x20,0x1F],[0x3F,0x40,0x38,0x40,0x3F],[0x63,0x14,0x08,0x14,0x63],
+[0x07,0x08,0x70,0x08,0x07],[0x61,0x51,0x49,0x45,0x43],[0x00,0x7F,0x41,0x41,0x00],
+[0x02,0x04,0x08,0x10,0x20],[0x00,0x41,0x41,0x7F,0x00],[0x04,0x02,0x01,0x02,0x04],
+[0x40,0x40,0x40,0x40,0x40],[0x00,0x01,0x02,0x04,0x00],[0x20,0x54,0x54,0x54,0x78],
+[0x7F,0x48,0x44,0x44,0x38],[0x38,0x44,0x44,0x44,0x20],[0x38,0x44,0x44,0x48,0x7F],
+[0x38,0x54,0x54,0x54,0x18],[0x08,0x7E,0x09,0x01,0x02],[0x0C,0x52,0x52,0x52,0x3E],
+[0x7F,0x08,0x04,0x04,0x78],[0x00,0x44,0x7D,0x40,0x00],[0x20,0x40,0x44,0x3D,0x00],
+[0x7F,0x10,0x28,0x44,0x00],[0x00,0x41,0x7F,0x40,0x00],[0x7C,0x04,0x18,0x04,0x78],
+[0x7C,0x08,0x04,0x04,0x78],[0x38,0x44,0x44,0x44,0x38],[0x7C,0x14,0x14,0x14,0x08],
+[0x08,0x14,0x14,0x18,0x7C],[0x7C,0x08,0x04,0x04,0x08],[0x48,0x54,0x54,0x54,0x20],
+[0x04,0x3F,0x44,0x40,0x20],[0x3C,0x40,0x40,0x20,0x7C],[0x1C,0x20,0x40,0x20,0x1C],
+[0x3C,0x40,0x30,0x40,0x3C],[0x44,0x28,0x10,0x28,0x44],[0x0C,0x50,0x50,0x50,0x3C],
+[0x44,0x64,0x54,0x4C,0x44],[0x00,0x08,0x36,0x41,0x00],[0x00,0x00,0x7F,0x00,0x00],
+[0x00,0x41,0x36,0x08,0x00],[0x10,0x08,0x08,0x10,0x08]
+];
+
+// ---- Color Conversion ----
+function rgb565to32(c) {
+    const r = ((c >> 11) & 0x1F) * 255 / 31 | 0;
+    const g = ((c >> 5) & 0x3F) * 255 / 63 | 0;
+    const b = (c & 0x1F) * 255 / 31 | 0;
+    return 0xFF000000 | (b << 16) | (g << 8) | r; // ABGR for canvas
+}
+
+function toRGB565(r, g, b) {
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+function hsvToRGB565(h, s, v) {
+    let c = v * s;
+    let x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    let m = v - c;
+    let r, g, b;
+    if (h < 60)       { r=c; g=x; b=0; }
+    else if (h < 120) { r=x; g=c; b=0; }
+    else if (h < 180) { r=0; g=c; b=x; }
+    else if (h < 240) { r=0; g=x; b=c; }
+    else if (h < 300) { r=x; g=0; b=c; }
+    else              { r=c; g=0; b=x; }
+    return toRGB565((r+m)*255|0, (g+m)*255|0, (b+m)*255|0);
+}
+
+function dimRGB565(color, factor) {
+    let r = ((color >> 11) & 0x1F) * factor | 0;
+    let g = ((color >> 5) & 0x3F) * factor | 0;
+    let b = (color & 0x1F) * factor | 0;
+    return (r << 11) | (g << 5) | b;
+}
+
+function lerpRGB565(c1, c2, t) {
+    let r1 = (c1>>11)&0x1F, r2 = (c2>>11)&0x1F;
+    let g1 = (c1>>5)&0x3F, g2 = (c2>>5)&0x3F;
+    let b1 = c1&0x1F, b2 = c2&0x1F;
+    let r = r1 + (r2-r1)*t | 0;
+    let g = g1 + (g2-g1)*t | 0;
+    let b = b1 + (b2-b1)*t | 0;
+    return (r<<11) | (g<<5) | b;
+}
+
+// ---- Graphics (operating on vfb) ----
+function gfxClear(color) { vfb.fill(color & 0xFFFF); }
+
+function gfxSetPixel(x, y, color) {
+    if (x >= 0 && x < VFB_W && y >= 0 && y < VFB_H)
+        vfb[y * VFB_W + x] = color & 0xFFFF;
+}
+
+function gfxFillRect(x, y, w, h, color) {
+    const c = color & 0xFFFF;
+    const x0 = Math.max(0, x), y0 = Math.max(0, y);
+    const x1 = Math.min(VFB_W, x + w), y1 = Math.min(VFB_H, y + h);
+    for (let ry = y0; ry < y1; ry++)
+        for (let rx = x0; rx < x1; rx++)
+            vfb[ry * VFB_W + rx] = c;
+}
+
+function gfxDrawRect(x, y, w, h, color) {
+    gfxDrawLineH(x, y, w, color);
+    gfxDrawLineH(x, y+h-1, w, color);
+    gfxDrawLineV(x, y, h, color);
+    gfxDrawLineV(x+w-1, y, h, color);
+}
+
+function gfxDrawLineH(x, y, len, color) {
+    if (y < 0 || y >= VFB_H) return;
+    const c = color & 0xFFFF;
+    const x0 = Math.max(0, x), x1 = Math.min(VFB_W, x + len);
+    for (let rx = x0; rx < x1; rx++) vfb[y * VFB_W + rx] = c;
+}
+
+function gfxDrawLineV(x, y, len, color) {
+    if (x < 0 || x >= VFB_W) return;
+    const c = color & 0xFFFF;
+    const y0 = Math.max(0, y), y1 = Math.min(VFB_H, y + len);
+    for (let ry = y0; ry < y1; ry++) vfb[ry * VFB_W + x] = c;
+}
+
+function gfxDrawCircle(cx, cy, r, color) {
+    let x = r, y = 0, d = 1 - r;
+    while (x >= y) {
+        gfxSetPixel(cx+x,cy+y,color); gfxSetPixel(cx-x,cy+y,color);
+        gfxSetPixel(cx+x,cy-y,color); gfxSetPixel(cx-x,cy-y,color);
+        gfxSetPixel(cx+y,cy+x,color); gfxSetPixel(cx-y,cy+x,color);
+        gfxSetPixel(cx+y,cy-x,color); gfxSetPixel(cx-y,cy-x,color);
+        y++;
+        if (d <= 0) d += 2*y+1;
+        else { x--; d += 2*(y-x)+1; }
+    }
+}
+
+function gfxFillCircle(cx, cy, r, color) {
+    let x = r, y = 0, d = 1 - r;
+    while (x >= y) {
+        gfxDrawLineH(cx-x, cy+y, 2*x+1, color);
+        gfxDrawLineH(cx-x, cy-y, 2*x+1, color);
+        gfxDrawLineH(cx-y, cy+x, 2*y+1, color);
+        gfxDrawLineH(cx-y, cy-x, 2*y+1, color);
+        y++;
+        if (d <= 0) d += 2*y+1;
+        else { x--; d += 2*(y-x)+1; }
+    }
+}
+
+function gfxDrawText(x, y, ptr, len, color, memory) {
+    const bytes = new Uint8Array(memory.buffer, ptr, len);
+    let cx = x;
+    for (let i = 0; i < len; i++) {
+        const ch = bytes[i];
+        if (ch >= 32 && ch <= 126) {
+            const glyph = FONT_5X7[ch - 32];
+            for (let col = 0; col < 5; col++)
+                for (let row = 0; row < 7; row++)
+                    if (glyph[col] & (1 << row))
+                        gfxSetPixel(cx + col, y + row, color);
+        }
+        cx += 6;
+    }
+    return cx - x;
+}
+
+function gfxDrawTextBig(x, y, ptr, len, color, memory) {
+    const bytes = new Uint8Array(memory.buffer, ptr, len);
+    let cx = x;
+    for (let i = 0; i < len; i++) {
+        const ch = bytes[i];
+        if (ch >= 32 && ch <= 126) {
+            const glyph = FONT_5X7[ch - 32];
+            for (let col = 0; col < 5; col++)
+                for (let row = 0; row < 7; row++)
+                    if (glyph[col] & (1 << row)) {
+                        const px = cx + col*2, py = y + row*2;
+                        gfxSetPixel(px,py,color); gfxSetPixel(px+1,py,color);
+                        gfxSetPixel(px,py+1,color); gfxSetPixel(px+1,py+1,color);
+                    }
+        }
+        cx += 12;
+    }
+    return cx - x;
+}
+
+// ---- Gesture Detection ----
+let gestureState = 0, touchX = -1, touchY = -1, isPressed = false;
+let gestureStartX, gestureStartY, gestureStartTime;
+
+canvas.addEventListener('mousedown', e => {
+    const r = canvas.getBoundingClientRect();
+    touchX = Math.floor(((e.clientX - r.left) / r.width) * VFB_W);
+    touchY = Math.floor(((e.clientY - r.top) / r.height) * VFB_H);
+    isPressed = true;
+    gestureStartX = e.clientX; gestureStartY = e.clientY;
+    gestureStartTime = performance.now();
+});
+
+canvas.addEventListener('mousemove', e => {
+    if (!isPressed) return;
+    const r = canvas.getBoundingClientRect();
+    touchX = Math.floor(((e.clientX - r.left) / r.width) * VFB_W);
+    touchY = Math.floor(((e.clientY - r.top) / r.height) * VFB_H);
+});
+
+canvas.addEventListener('mouseup', e => {
+    if (!isPressed) return;
+    const dx = e.clientX - gestureStartX;
+    const dy = e.clientY - gestureStartY;
+    const dur = performance.now() - gestureStartTime;
+    if (Math.abs(dx) > 30 || Math.abs(dy) > 30) {
+        gestureState = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 3 : 2) : (dy > 0 ? 5 : 4);
+    } else if (dur < 300) gestureState = 1;
+    else if (dur > 500) gestureState = 6;
+    touchX = -1; touchY = -1; isPressed = false;
+});
+
+canvas.addEventListener('mouseleave', () => {
+    if (isPressed) { touchX = -1; touchY = -1; isPressed = false; }
+});
+
+function consumeGesture() { const g = gestureState; gestureState = 0; return g; }
+
+// ---- Render Pipeline ----
+function renderToCanvas(mode) {
+    const p = pixels;
+    if (mode === 'flat') {
+        for (let vy = 0; vy < VFB_H; vy++) {
+            for (let vx = 0; vx < VFB_W; vx++) {
+                const c32 = rgb565to32(vfb[vy * VFB_W + vx]);
+                const bx = vx * SCALE, by = vy * SCALE;
+                for (let dy = 0; dy < SCALE; dy++) {
+                    const off = (by + dy) * LCD_W + bx;
+                    for (let dx = 0; dx < SCALE; dx++) p[off + dx] = c32;
+                }
+            }
+        }
+    } else if (mode === 'grid') {
+        for (let vy = 0; vy < VFB_H; vy++) {
+            for (let vx = 0; vx < VFB_W; vx++) {
+                const c = vfb[vy * VFB_W + vx];
+                const c32 = rgb565to32(c);
+                // Dim version for borders
+                const r = ((c>>11)&0x1F)*255/31*0.3|0;
+                const g = ((c>>5)&0x3F)*255/63*0.3|0;
+                const b = (c&0x1F)*255/31*0.3|0;
+                const dim32 = 0xFF000000|(b<<16)|(g<<8)|r;
+                const bx = vx * SCALE, by = vy * SCALE;
+                for (let dy = 0; dy < SCALE; dy++) {
+                    const off = (by + dy) * LCD_W + bx;
+                    const isEdgeY = dy === SCALE - 1;
+                    for (let dx = 0; dx < SCALE; dx++) {
+                        p[off + dx] = (isEdgeY || dx === SCALE - 1) ? dim32 : c32;
+                    }
+                }
+            }
+        }
+    } else if (mode === 'glow') {
+        // Render flat first
+        for (let vy = 0; vy < VFB_H; vy++) {
+            for (let vx = 0; vx < VFB_W; vx++) {
+                const c32 = rgb565to32(vfb[vy * VFB_W + vx]);
+                const bx = vx * SCALE, by = vy * SCALE;
+                for (let dy = 0; dy < SCALE; dy++) {
+                    const off = (by + dy) * LCD_W + bx;
+                    for (let dx = 0; dx < SCALE; dx++) p[off + dx] = c32;
+                }
+            }
+        }
+        // Simple bloom: brighten center of each block
+        for (let vy = 0; vy < VFB_H; vy++) {
+            for (let vx = 0; vx < VFB_W; vx++) {
+                const c = vfb[vy * VFB_W + vx];
+                if (c === 0) continue;
+                const bx = vx * SCALE, by = vy * SCALE;
+                // Add a slight radial falloff within each block
+                for (let dy = 0; dy < SCALE; dy++) {
+                    for (let dx = 0; dx < SCALE; dx++) {
+                        const distX = Math.abs(dx - 4.5) / 5;
+                        const distY = Math.abs(dy - 4.5) / 5;
+                        const dist = Math.sqrt(distX*distX + distY*distY);
+                        const dim = Math.max(0, 1 - dist * 0.4);
+                        const off = (by + dy) * LCD_W + bx + dx;
+                        const orig = p[off];
+                        const or_ = orig & 0xFF;
+                        const og = (orig >> 8) & 0xFF;
+                        const ob = (orig >> 16) & 0xFF;
+                        const nr = Math.min(255, or_ * dim | 0);
+                        const ng = Math.min(255, og * dim | 0);
+                        const nb = Math.min(255, ob * dim | 0);
+                        p[off] = 0xFF000000 | (nb << 16) | (ng << 8) | nr;
+                    }
+                }
+            }
+        }
+    }
+    ctx.putImageData(imageData, 0, 0);
+}
+
+// ---- WASM Loading ----
+const faces = {};
+let activeFace = null;
+let frameCount = 0;
+
+async function loadFace(name, wasmBytes) {
+    const memory = new WebAssembly.Memory({ initial: 2, maximum: 4 });
+
+    const imports = {
+        env: {
+            memory,
+            clear:       c => gfxClear(c),
+            set_pixel:   (x,y,c) => gfxSetPixel(x,y,c),
+            fill_rect:   (x,y,w,h,c) => gfxFillRect(x,y,w,h,c),
+            draw_rect:   (x,y,w,h,c) => gfxDrawRect(x,y,w,h,c),
+            draw_line_h: (x,y,l,c) => gfxDrawLineH(x,y,l,c),
+            draw_line_v: (x,y,l,c) => gfxDrawLineV(x,y,l,c),
+            draw_circle: (cx,cy,r,c) => gfxDrawCircle(cx,cy,r,c),
+            fill_circle: (cx,cy,r,c) => gfxFillCircle(cx,cy,r,c),
+            draw_text:   (x,y,p,l,c) => gfxDrawText(x,y,p,l,c,memory),
+            draw_text_big:(x,y,p,l,c) => gfxDrawTextBig(x,y,p,l,c,memory),
+            rgb:         (r,g,b) => toRGB565(r,g,b),
+            hsv:         (h,s,v) => hsvToRGB565(h,s,v),
+            dim_color:   (c,f) => dimRGB565(c,f),
+            lerp_color:  (c1,c2,t) => lerpRGB565(c1,c2,t),
+            sinf:        Math.sin,
+            cosf:        Math.cos,
+            sqrtf:       Math.sqrt,
+            atan2f:      Math.atan2,
+            fmodf:       (x,y) => ((x % y) + y) % y,  // match C fmodf behavior for positive results
+            absf:        Math.abs,
+            rand:        () => (Math.random() * 32767) | 0,
+            srand:       () => {},
+            millis:      () => BigInt(Math.floor(performance.now())),
+            width:       () => VFB_W,
+            height:      () => VFB_H,
+            log_print:   (ptr, len) => {
+                const bytes = new Uint8Array(memory.buffer, ptr, len);
+                consoleLog(`[${name}] ${new TextDecoder().decode(bytes)}`);
+            },
+            get_frame:   () => frameCount,
+            get_gesture: consumeGesture,
+            get_touch_x: () => touchX,
+            get_touch_y: () => touchY,
+            is_pressed:  () => isPressed ? 1 : 0,
+            // Easing functions (t: 0.0 to 1.0)
+            ease_in_quad:      t => t * t,
+            ease_out_quad:     t => 1 - (1 - t) * (1 - t),
+            ease_in_out_quad:  t => t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) * 0.5,
+            ease_in_cubic:     t => t * t * t,
+            ease_out_cubic:    t => { let u = 1 - t; return 1 - u * u * u; },
+            ease_in_out_cubic: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) * 0.5,
+            ease_out_elastic:  t => {
+                if (t <= 0) return 0;
+                if (t >= 1) return 1;
+                const p = 0.3;
+                return Math.pow(2, -10 * t) * Math.sin((t - p / 4) * (2 * Math.PI) / p) + 1;
+            },
+            ease_out_bounce:   t => {
+                if (t < 1 / 2.75)   return 7.5625 * t * t;
+                if (t < 2 / 2.75)   { t -= 1.5 / 2.75;   return 7.5625 * t * t + 0.75; }
+                if (t < 2.5 / 2.75) { t -= 2.25 / 2.75;  return 7.5625 * t * t + 0.9375; }
+                t -= 2.625 / 2.75; return 7.5625 * t * t + 0.984375;
+            },
+        }
+    };
+
+    try {
+        const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+        instance.exports.app_init();
+        faces[name] = {
+            instance,
+            update: instance.exports.app_update,
+            draw: instance.exports.app_draw,
+            memory,
+        };
+        if (!activeFace) activeFace = name;
+        updateFaceTabs();
+        consoleLog(`Loaded face: ${name}`);
+    } catch (e) {
+        consoleLog(`Error loading ${name}: ${e.message}`);
+    }
+}
+
+// ---- Main Loop ----
+let lastTime = 0;
+let fpsFrames = 0, fpsLast = 0;
+let statUpdate = 0, statDraw = 0, statRender = 0;
+
+function loop(timestamp) {
+    const dt = timestamp - lastTime;
+    lastTime = timestamp;
+    const glowMode = document.getElementById('glow-mode').value;
+
+    if (activeFace && faces[activeFace]) {
+        const face = faces[activeFace];
+        const t0 = performance.now();
+        face.update(frameCount, Math.floor(dt));
+        const t1 = performance.now();
+        face.draw();
+        const t2 = performance.now();
+        renderToCanvas(glowMode);
+        const t3 = performance.now();
+
+        statUpdate = t1 - t0;
+        statDraw = t2 - t1;
+        statRender = t3 - t2;
+        frameCount++;
+    }
+
+    // FPS counter
+    fpsFrames++;
+    if (timestamp - fpsLast >= 1000) {
+        document.getElementById('fps').textContent = fpsFrames + ' FPS';
+        fpsFrames = 0;
+        fpsLast = timestamp;
+        updateStats();
+    }
+
+    requestAnimationFrame(loop);
+}
+
+// ---- UI ----
+function updateFaceTabs() {
+    const tabs = document.getElementById('face-tabs');
+    tabs.innerHTML = '';
+    for (const name of Object.keys(faces)) {
+        const tab = document.createElement('div');
+        tab.className = 'tab' + (name === activeFace ? ' active' : '');
+        tab.textContent = name;
+        tab.onclick = () => { activeFace = name; updateFaceTabs(); };
+        tabs.appendChild(tab);
+    }
+}
+
+function updateStats() {
+    const el = document.getElementById('stats-content');
+    const face = activeFace ? faces[activeFace] : null;
+    el.innerHTML = `
+        Frame: <span class="val">${frameCount}</span><br>
+        Update: <span class="val">${statUpdate.toFixed(2)}ms</span><br>
+        Draw: <span class="val">${statDraw.toFixed(2)}ms</span><br>
+        Render: <span class="val">${statRender.toFixed(2)}ms</span><br>
+        Total: <span class="val">${(statUpdate+statDraw+statRender).toFixed(2)}ms</span><br>
+        ${face ? `Memory: <span class="val">${(face.memory.buffer.byteLength/1024).toFixed(0)}KB</span>` : ''}
+    `;
+}
+
+function consoleLog(msg) {
+    const el = document.getElementById('console-output');
+    el.textContent += msg + '\n';
+    el.scrollTop = el.scrollHeight;
+}
+
+// ---- Drag & Drop ----
+const dropOverlay = document.getElementById('drop-overlay');
+document.addEventListener('dragover', e => { e.preventDefault(); dropOverlay.style.display = 'flex'; });
+document.addEventListener('dragleave', e => {
+    if (e.relatedTarget === null || !document.contains(e.relatedTarget))
+        dropOverlay.style.display = 'none';
+});
+document.addEventListener('drop', async e => {
+    e.preventDefault();
+    dropOverlay.style.display = 'none';
+    for (const file of e.dataTransfer.files) {
+        if (file.name.endsWith('.wasm')) {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            await loadFace(file.name.replace('.wasm', ''), bytes);
+        }
+    }
+});
+
+// ---- File Picker ----
+document.getElementById('btn-load').onclick = () => document.getElementById('file-input').click();
+document.getElementById('file-input').onchange = async e => {
+    for (const file of e.target.files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await loadFace(file.name.replace('.wasm', ''), bytes);
+    }
+};
+
+// ---- Start ----
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
