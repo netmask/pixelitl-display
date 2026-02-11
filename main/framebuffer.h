@@ -1,4 +1,5 @@
-// Triple-buffered virtual framebuffer (80x48) with on-the-fly LCD scaling
+// Triple-buffered virtual framebuffer with on-the-fly LCD scaling
+// Supports standard (80x48, 10x) and HD (160x96, 5x) resolution per face.
 #pragma once
 
 #include <stdint.h>
@@ -20,3 +21,9 @@ void fb_wait_vsync(void);
 // pos_px: pixel offset into the 800x480 frame
 // len_bytes: bounce buffer size in bytes
 void fb_fill_bounce(void *bounce_buf, int pos_px, int len_bytes);
+
+// Dynamic resolution — call before app_init or before each frame
+void fb_set_resolution(bool hd);
+int  fb_width(void);
+int  fb_height(void);
+int  fb_scale(void);

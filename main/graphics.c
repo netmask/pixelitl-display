@@ -1,4 +1,5 @@
 #include "graphics.h"
+#include "framebuffer.h"
 #include "board.h"
 #include "font5x7.h"
 #include "simd_ops.h"
@@ -12,17 +13,15 @@ static inline int clamp(int v, int lo, int hi) {
 }
 
 static inline void safe_pixel(uint16_t *fb, int x, int y, uint16_t color) {
-    if (x >= 0 && x < VFB_WIDTH && y >= 0 && y < VFB_HEIGHT) {
-        fb[y * VFB_WIDTH + x] = color;
+    if (x >= 0 && x < fb_width() && y >= 0 && y < fb_height()) {
+        fb[y * fb_width() + x] = color;
     }
 }
 
 // --- Core drawing ---
 
 void gfx_clear(uint16_t *fb, uint16_t color) {
-    // SIMD: fill 7680 bytes (80×48 RGB565) with 128-bit stores
-    // 7680 bytes = 240 × 32 bytes — perfect for SIMD
-    simd_fill16(fb, color, VFB_PIXEL_COUNT * sizeof(uint16_t));
+    simd_fill16(fb, color, fb_width() * fb_height() * sizeof(uint16_t));
 }
 
 void gfx_set_pixel(uint16_t *fb, int x, int y, uint16_t color) {
@@ -30,14 +29,15 @@ void gfx_set_pixel(uint16_t *fb, int x, int y, uint16_t color) {
 }
 
 void gfx_fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t color) {
-    int x0 = clamp(x, 0, VFB_WIDTH);
-    int y0 = clamp(y, 0, VFB_HEIGHT);
-    int x1 = clamp(x + w, 0, VFB_WIDTH);
-    int y1 = clamp(y + h, 0, VFB_HEIGHT);
+    int fw = fb_width(), fh = fb_height();
+    int x0 = clamp(x, 0, fw);
+    int y0 = clamp(y, 0, fh);
+    int x1 = clamp(x + w, 0, fw);
+    int y1 = clamp(y + h, 0, fh);
 
     for (int ry = y0; ry < y1; ry++) {
         for (int rx = x0; rx < x1; rx++) {
-            fb[ry * VFB_WIDTH + rx] = color;
+            fb[ry * fw + rx] = color;
         }
     }
 }
@@ -50,20 +50,22 @@ void gfx_draw_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t color) {
 }
 
 void gfx_draw_line_h(uint16_t *fb, int x, int y, int len, uint16_t color) {
-    if (y < 0 || y >= VFB_HEIGHT) return;
-    int x0 = clamp(x, 0, VFB_WIDTH);
-    int x1 = clamp(x + len, 0, VFB_WIDTH);
+    int fw = fb_width();
+    if (y < 0 || y >= fb_height()) return;
+    int x0 = clamp(x, 0, fw);
+    int x1 = clamp(x + len, 0, fw);
     for (int rx = x0; rx < x1; rx++) {
-        fb[y * VFB_WIDTH + rx] = color;
+        fb[y * fw + rx] = color;
     }
 }
 
 void gfx_draw_line_v(uint16_t *fb, int x, int y, int len, uint16_t color) {
-    if (x < 0 || x >= VFB_WIDTH) return;
-    int y0 = clamp(y, 0, VFB_HEIGHT);
-    int y1 = clamp(y + len, 0, VFB_HEIGHT);
+    int fw = fb_width(), fh = fb_height();
+    if (x < 0 || x >= fw) return;
+    int y0 = clamp(y, 0, fh);
+    int y1 = clamp(y + len, 0, fh);
     for (int ry = y0; ry < y1; ry++) {
-        fb[ry * VFB_WIDTH + x] = color;
+        fb[ry * fw + x] = color;
     }
 }
 

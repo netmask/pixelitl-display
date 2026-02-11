@@ -6,10 +6,8 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "bootloader/bootloader.bin"
   "bootloader/bootloader.elf"
   "bootloader/bootloader.map"
-  "clock.wasm.S"
   "config/sdkconfig.cmake"
   "config/sdkconfig.h"
-  "demo.wasm.S"
   "esp-idf/mbedtls/x509_crt_bundle"
   "flash_app_args"
   "flash_bootloader_args"
@@ -20,8 +18,8 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "ldgen_libraries.in"
   "pixelitl_display.bin"
   "pixelitl_display.map"
-  "plasma.wasm.S"
   "project_elf_src_esp32s3.c"
+  "store.wasm.S"
   "x509_crt_bundle.S"
   )
 endif()

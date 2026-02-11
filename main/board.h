@@ -45,8 +45,14 @@
 #define TOUCH_RST             (-1)
 #define TOUCH_INT             (-1)
 
-// Virtual framebuffer
+// Virtual framebuffer — standard resolution
 #define VFB_WIDTH             80
 #define VFB_HEIGHT            48
 #define VFB_SCALE             10
 #define VFB_PIXEL_COUNT       (VFB_WIDTH * VFB_HEIGHT)
+
+// Virtual framebuffer — HD resolution (per-face opt-in)
+#define VFB_HD_WIDTH          160
+#define VFB_HD_HEIGHT         96
+#define VFB_HD_SCALE          5
+#define VFB_HD_PIXEL_COUNT    (VFB_HD_WIDTH * VFB_HD_HEIGHT)

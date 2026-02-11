@@ -1,0 +1,6 @@
+plasma|plasma.wasm
+clock|clock.wasm
+demo|demo.wasm
+hd_demo|hd_demo.wasm
+weather|weather.wasm
+buttons|buttons.wasm

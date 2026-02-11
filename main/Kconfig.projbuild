@@ -1,0 +1,15 @@
+menu "Pixelitl Display"
+
+    config PIXELITL_WIFI_SSID
+        string "WiFi SSID"
+        default "pixelitl"
+        help
+            Default WiFi SSID. Can be overridden at runtime via NVS.
+
+    config PIXELITL_WIFI_PASSWORD
+        string "WiFi Password"
+        default "pixelitl"
+        help
+            Default WiFi password. Can be overridden at runtime via NVS.
+
+endmenu

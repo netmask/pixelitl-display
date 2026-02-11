@@ -1,4 +1,5 @@
 #include "touch.h"
+#include "framebuffer.h"
 #include "board.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
@@ -72,8 +73,8 @@ void touch_poll(void) {
     if (currently_pressed) {
         s_state.touch_x   = x;
         s_state.touch_y   = y;
-        s_state.virtual_x = x / VFB_SCALE;
-        s_state.virtual_y = y / VFB_SCALE;
+        s_state.virtual_x = x / fb_scale();
+        s_state.virtual_y = y / fb_scale();
         s_state.pressed   = true;
 
         if (!s_gest.was_pressed) {

@@ -4,6 +4,9 @@
 #include "framebuffer.h"
 #include "touch.h"
 #include "board.h"
+#include "wifi.h"
+#include "http_request.h"
+#include "kv_store.h"
 #include "wasm3.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -191,14 +194,14 @@ m3ApiRawFunction(host_draw_text_big) {
     m3ApiReturn(width);
 }
 
-// Blit entire framebuffer from WASM memory in one call (80×48 RGB565 = 7680 bytes)
+// Blit entire framebuffer from WASM memory in one call
 m3ApiRawFunction(host_blit_framebuffer) {
     m3ApiGetArg(int32_t, ptr);
     BUDGET_CHECK();
 
     uint32_t mem_size;
     uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
-    uint32_t fb_bytes = VFB_WIDTH * VFB_HEIGHT * sizeof(uint16_t);
+    uint32_t fb_bytes = fb_width() * fb_height() * sizeof(uint16_t);
     if (mem && (uint32_t)(ptr + fb_bytes) <= mem_size) {
         memcpy(g_current_face->draw_target, mem + ptr, fb_bytes);
     }
@@ -223,14 +226,15 @@ m3ApiRawFunction(host_blit_rect) {
 
     const uint16_t *src = (const uint16_t *)(mem + ptr);
     uint16_t *dst = g_current_face->draw_target;
+    int fw = fb_width(), fh = fb_height();
 
     for (int row = 0; row < h; row++) {
         int sy = dy + row;
-        if (sy < 0 || sy >= VFB_HEIGHT) continue;
+        if (sy < 0 || sy >= fh) continue;
         for (int col = 0; col < w; col++) {
             int sx = dx + col;
-            if (sx < 0 || sx >= VFB_WIDTH) continue;
-            dst[sy * VFB_WIDTH + sx] = src[row * w + col];
+            if (sx < 0 || sx >= fw) continue;
+            dst[sy * fw + sx] = src[row * w + col];
         }
     }
     m3ApiSuccess();
@@ -397,12 +401,12 @@ m3ApiRawFunction(host_millis) {
 
 m3ApiRawFunction(host_width) {
     m3ApiReturnType(int32_t);
-    m3ApiReturn(VFB_WIDTH);
+    m3ApiReturn(fb_width());
 }
 
 m3ApiRawFunction(host_height) {
     m3ApiReturnType(int32_t);
-    m3ApiReturn(VFB_HEIGHT);
+    m3ApiReturn(fb_height());
 }
 
 m3ApiRawFunction(host_log_print) {
@@ -425,6 +429,18 @@ m3ApiRawFunction(host_get_frame) {
     m3ApiReturn((int32_t)s_frame_count);
 }
 
+// ===================== Resolution =====================
+
+m3ApiRawFunction(host_set_resolution) {
+    m3ApiGetArg(int32_t, mode);
+    bool hd = (mode == 1);
+    fb_set_resolution(hd);
+    if (g_current_face) {
+        g_current_face->hd = hd;
+    }
+    m3ApiSuccess();
+}
+
 // ===================== Touch =====================
 
 m3ApiRawFunction(host_get_gesture) {
@@ -445,6 +461,179 @@ m3ApiRawFunction(host_get_touch_y) {
 m3ApiRawFunction(host_is_pressed) {
     m3ApiReturnType(int32_t);
     m3ApiReturn(touch_get_state()->pressed ? 1 : 0);
+}
+
+// ===================== WiFi =====================
+
+m3ApiRawFunction(host_wifi_status) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn(wifi_is_connected() ? 1 : 0);
+}
+
+// ===================== HTTP =====================
+
+m3ApiRawFunction(host_http_get) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, ptr);
+    m3ApiGetArg(int32_t, len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || len <= 0 || (uint32_t)(ptr + len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(http_request_start_get((const char *)(mem + ptr), len));
+}
+
+m3ApiRawFunction(host_http_post) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, url_ptr);
+    m3ApiGetArg(int32_t, url_len);
+    m3ApiGetArg(int32_t, ct_ptr);
+    m3ApiGetArg(int32_t, ct_len);
+    m3ApiGetArg(int32_t, body_ptr);
+    m3ApiGetArg(int32_t, body_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || url_len <= 0 || ct_len <= 0 || body_len < 0) {
+        m3ApiReturn(-1);
+    }
+    if ((uint32_t)(url_ptr + url_len) > mem_size ||
+        (uint32_t)(ct_ptr + ct_len) > mem_size ||
+        (uint32_t)(body_ptr + body_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(http_request_start_post(
+        (const char *)(mem + url_ptr), url_len,
+        (const char *)(mem + ct_ptr), ct_len,
+        mem + body_ptr, body_len));
+}
+
+m3ApiRawFunction(host_http_status) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiReturn((int32_t)http_request_status(handle));
+}
+
+m3ApiRawFunction(host_http_response_code) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiReturn(http_request_response_code(handle));
+}
+
+m3ApiRawFunction(host_http_response_len) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiReturn(http_request_response_len(handle));
+}
+
+m3ApiRawFunction(host_http_read) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, handle);
+    m3ApiGetArg(int32_t, dst_ptr);
+    m3ApiGetArg(int32_t, max_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || max_len <= 0 || (uint32_t)(dst_ptr + max_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(http_request_read(handle, mem + dst_ptr, max_len));
+}
+
+m3ApiRawFunction(host_http_close) {
+    m3ApiGetArg(int32_t, handle);
+    http_request_close(handle);
+    m3ApiSuccess();
+}
+
+// ===================== KV Store =====================
+
+m3ApiRawFunction(host_kv_set) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, key_ptr);
+    m3ApiGetArg(int32_t, key_len);
+    m3ApiGetArg(int32_t, val_ptr);
+    m3ApiGetArg(int32_t, val_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || key_len <= 0 || val_len < 0 ||
+        (uint32_t)(key_ptr + key_len) > mem_size ||
+        (uint32_t)(val_ptr + val_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(kv_store_set(g_current_face->name,
+                             mem + key_ptr, key_len,
+                             mem + val_ptr, val_len));
+}
+
+m3ApiRawFunction(host_kv_get) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, key_ptr);
+    m3ApiGetArg(int32_t, key_len);
+    m3ApiGetArg(int32_t, dst_ptr);
+    m3ApiGetArg(int32_t, max_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || key_len <= 0 || max_len <= 0 ||
+        (uint32_t)(key_ptr + key_len) > mem_size ||
+        (uint32_t)(dst_ptr + max_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(kv_store_get(g_current_face->name,
+                             mem + key_ptr, key_len,
+                             mem + dst_ptr, max_len));
+}
+
+m3ApiRawFunction(host_kv_del) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, key_ptr);
+    m3ApiGetArg(int32_t, key_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || key_len <= 0 || (uint32_t)(key_ptr + key_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(kv_store_del(g_current_face->name, mem + key_ptr, key_len));
+}
+
+// ===================== Face Install =====================
+
+m3ApiRawFunction(host_face_install) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, url_ptr);
+    m3ApiGetArg(int32_t, url_len);
+    m3ApiGetArg(int32_t, name_ptr);
+    m3ApiGetArg(int32_t, name_len);
+
+    uint32_t mem_size;
+    uint8_t *mem = m3_GetMemory(g_current_face->runtime, &mem_size, 0);
+    if (!mem || url_len <= 0 || name_len <= 0 ||
+        (uint32_t)(url_ptr + url_len) > mem_size ||
+        (uint32_t)(name_ptr + name_len) > mem_size) {
+        m3ApiReturn(-1);
+    }
+    m3ApiReturn(wasm_install_start((const char *)(mem + url_ptr), url_len,
+                                    (const char *)(mem + name_ptr), name_len));
+}
+
+m3ApiRawFunction(host_face_install_status) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn((int32_t)wasm_install_status());
+}
+
+m3ApiRawFunction(host_face_install_reset) {
+    wasm_install_reset();
+    m3ApiSuccess();
+}
+
+m3ApiRawFunction(host_face_count) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn(wasm_face_count());
 }
 
 // ===================== Link all =====================
@@ -493,15 +682,39 @@ void wasm_host_link_all(IM3Module module) {
     m3_LinkRawFunction(module, MOD, "srand",         "v(i)",     host_srand);
 
     // System
-    m3_LinkRawFunction(module, MOD, "millis",        "I()",      host_millis);
-    m3_LinkRawFunction(module, MOD, "width",         "i()",      host_width);
-    m3_LinkRawFunction(module, MOD, "height",        "i()",      host_height);
-    m3_LinkRawFunction(module, MOD, "log_print",     "v(ii)",    host_log_print);
-    m3_LinkRawFunction(module, MOD, "get_frame",     "i()",      host_get_frame);
+    m3_LinkRawFunction(module, MOD, "millis",          "I()",      host_millis);
+    m3_LinkRawFunction(module, MOD, "width",           "i()",      host_width);
+    m3_LinkRawFunction(module, MOD, "height",          "i()",      host_height);
+    m3_LinkRawFunction(module, MOD, "log_print",       "v(ii)",    host_log_print);
+    m3_LinkRawFunction(module, MOD, "get_frame",       "i()",      host_get_frame);
+    m3_LinkRawFunction(module, MOD, "set_resolution",  "v(i)",     host_set_resolution);
 
     // Touch
     m3_LinkRawFunction(module, MOD, "get_gesture",   "i()",      host_get_gesture);
     m3_LinkRawFunction(module, MOD, "get_touch_x",   "i()",      host_get_touch_x);
     m3_LinkRawFunction(module, MOD, "get_touch_y",   "i()",      host_get_touch_y);
     m3_LinkRawFunction(module, MOD, "is_pressed",    "i()",      host_is_pressed);
+
+    // WiFi
+    m3_LinkRawFunction(module, MOD, "wifi_status",   "i()",      host_wifi_status);
+
+    // HTTP (async)
+    m3_LinkRawFunction(module, MOD, "http_get",           "i(ii)",      host_http_get);
+    m3_LinkRawFunction(module, MOD, "http_post",          "i(iiiiii)",  host_http_post);
+    m3_LinkRawFunction(module, MOD, "http_status",        "i(i)",       host_http_status);
+    m3_LinkRawFunction(module, MOD, "http_response_code", "i(i)",       host_http_response_code);
+    m3_LinkRawFunction(module, MOD, "http_response_len",  "i(i)",       host_http_response_len);
+    m3_LinkRawFunction(module, MOD, "http_read",          "i(iii)",     host_http_read);
+    m3_LinkRawFunction(module, MOD, "http_close",         "v(i)",       host_http_close);
+
+    // KV Store
+    m3_LinkRawFunction(module, MOD, "kv_set",        "i(iiii)",  host_kv_set);
+    m3_LinkRawFunction(module, MOD, "kv_get",        "i(iiii)",  host_kv_get);
+    m3_LinkRawFunction(module, MOD, "kv_del",        "i(ii)",    host_kv_del);
+
+    // Face Install
+    m3_LinkRawFunction(module, MOD, "face_install",        "i(iiii)", host_face_install);
+    m3_LinkRawFunction(module, MOD, "face_install_status", "i()",     host_face_install_status);
+    m3_LinkRawFunction(module, MOD, "face_install_reset",  "v()",     host_face_install_reset);
+    m3_LinkRawFunction(module, MOD, "face_count",          "i()",     host_face_count);
 }
