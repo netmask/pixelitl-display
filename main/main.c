@@ -23,6 +23,12 @@ extern const uint8_t store_wasm_end[]     asm("_binary_store_wasm_end");
 static int s_active_face = 0;
 static uint32_t s_frame_count = 0;
 
+void wasm_set_active_face(int id) {
+    if (id >= 0 && id < wasm_face_count()) {
+        s_active_face = id;
+    }
+}
+
 // --- Core 1: WASM executor ---
 // Syncs to LCD vsync via fb_wait_vsync() — produces exactly one frame per
 // LCD refresh period (~51 Hz at 21 MHz pixel clock).
@@ -126,12 +132,12 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(touch_task, "touch", 4096,  NULL, 5, NULL, 0);
 
-    // Allocate wasm_task stack from PSRAM — internal RAM is too fragmented for 32KB
+    // Allocate wasm_task stack from PSRAM — internal RAM is too fragmented for 48KB
     static StaticTask_t s_wasm_tcb;
     static StackType_t *s_wasm_stack;
-    s_wasm_stack = heap_caps_malloc(32768, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_wasm_stack = heap_caps_malloc(49152, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_wasm_stack) {
-        xTaskCreateStaticPinnedToCore(wasm_task, "wasm", 32768, NULL, 5,
+        xTaskCreateStaticPinnedToCore(wasm_task, "wasm", 49152, NULL, 5,
                                        s_wasm_stack, &s_wasm_tcb, 1);
     } else {
         ESP_LOGE(TAG, "FAILED to allocate wasm_task stack from PSRAM!");

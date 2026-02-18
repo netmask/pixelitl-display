@@ -19,6 +19,8 @@ typedef struct {
     volatile int32_t  virtual_x;    // Virtual FB coords (0-79, -1 if none)
     volatile int32_t  virtual_y;    // Virtual FB coords (0-47, -1 if none)
     volatile int32_t  gesture;      // Last gesture (consumed on read)
+    volatile int32_t  gesture_x;    // Virtual coords at gesture time
+    volatile int32_t  gesture_y;
     volatile bool     pressed;
 } touch_state_t;
 

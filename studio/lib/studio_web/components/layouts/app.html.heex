@@ -1,0 +1,20 @@
+<nav class="navbar bg-base-200 border-b border-base-content/10 px-4">
+  <div class="flex-1">
+    <.link navigate={~p"/simulator"} class="btn btn-ghost text-lg font-mono tracking-wider">
+      PIXELITL STUDIO
+    </.link>
+  </div>
+  <div class="flex-none">
+    <ul class="menu menu-horizontal px-1 gap-1">
+      <li><.link navigate={~p"/simulator"} class="btn btn-ghost btn-sm">Simulator</.link></li>
+      <li><.link navigate={~p"/editor"} class="btn btn-ghost btn-sm">Editor</.link></li>
+      <li><.link navigate={~p"/faces"} class="btn btn-ghost btn-sm">Faces</.link></li>
+    </ul>
+  </div>
+</nav>
+
+<main>
+  {render_slot(@inner_block)}
+</main>
+
+<.flash_group flash={@flash} />

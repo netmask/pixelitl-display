@@ -204,6 +204,12 @@ extern void face_install_reset(void);
 __attribute__((import_module("env"), import_name("face_count")))
 extern int face_count(void);
 
+__attribute__((import_module("env"), import_name("face_get_name")))
+extern int face_get_name(int index, char *dst, int max_len);
+
+__attribute__((import_module("env"), import_name("face_switch")))
+extern void face_switch(int index);
+
 // --- Convenience helpers (no libc available) ---
 
 static inline int pxl_strlen(const char *s) {

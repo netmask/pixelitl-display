@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern void wasm_set_active_face(int id);
+
 static uint32_t s_frame_count = 0;
 const char *wasm_host_budget_trap = "budget exceeded";
 
@@ -636,6 +638,29 @@ m3ApiRawFunction(host_face_count) {
     m3ApiReturn(wasm_face_count());
 }
 
+m3ApiRawFunction(host_face_switch) {
+    m3ApiGetArg(int32_t, index);
+    wasm_set_active_face(index);
+    m3ApiSuccess();
+}
+
+m3ApiRawFunction(host_face_get_name) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, index);
+    m3ApiGetArg(int32_t, dst_ptr);
+    m3ApiGetArg(int32_t, max_len);
+    m3ApiGetArgMem(uint8_t *, mem);
+
+    face_t *f = wasm_get_face(index);
+    if (!f || max_len <= 0) m3ApiReturn(0);
+
+    int name_len = strlen(f->name);
+    if (name_len >= max_len) name_len = max_len - 1;
+    memcpy(mem + dst_ptr, f->name, name_len);
+    mem[dst_ptr + name_len] = '\0';
+    m3ApiReturn(name_len);
+}
+
 // ===================== Link all =====================
 
 #define MOD "env"
@@ -717,4 +742,6 @@ void wasm_host_link_all(IM3Module module) {
     m3_LinkRawFunction(module, MOD, "face_install_status", "i()",     host_face_install_status);
     m3_LinkRawFunction(module, MOD, "face_install_reset",  "v()",     host_face_install_reset);
     m3_LinkRawFunction(module, MOD, "face_count",          "i()",     host_face_count);
+    m3_LinkRawFunction(module, MOD, "face_get_name",      "i(iii)",  host_face_get_name);
+    m3_LinkRawFunction(module, MOD, "face_switch",        "v(i)",    host_face_switch);
 }

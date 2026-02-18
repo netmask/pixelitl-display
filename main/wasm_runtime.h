@@ -7,7 +7,7 @@
 #include "wasm3.h"
 
 #define MAX_FACES         12
-#define WASM_STACK_SIZE   (16 * 1024)
+#define WASM_STACK_SIZE   (24 * 1024)
 #define DEFAULT_BUDGET_US 100000
 
 typedef enum {
