@@ -1,37 +1,11 @@
 #include "pixelitl.h"
 
-// ---- Utility ----
-
-static int itoa_simple(int val, char *buf, int buf_sz) {
-    if (buf_sz < 2) return 0;
-    if (val == 0) { buf[0] = '0'; return 1; }
-    int neg = 0;
-    if (val < 0) { neg = 1; val = -val; }
-    char tmp[12];
-    int n = 0;
-    while (val > 0 && n < 11) { tmp[n++] = '0' + (val % 10); val /= 10; }
-    int out = 0;
-    if (neg && out < buf_sz) buf[out++] = '-';
-    for (int i = n - 1; i >= 0 && out < buf_sz; i--) buf[out++] = tmp[i];
-    return out;
-}
-
-static int pxl_strcpy(char *dst, int dst_sz, const char *src) {
-    int i = 0;
-    while (src[i] && i < dst_sz - 1) { dst[i] = src[i]; i++; }
-    dst[i] = '\0';
-    return i;
-}
-
-static int pxl_memcpy(char *dst, const char *src, int n) {
-    for (int i = 0; i < n; i++) dst[i] = src[i];
-    return n;
-}
+// ===== PIXELITL FACE STORE =====
+// Ultra resolution (200x120) with 80s demoscene aesthetics
 
 // ---- Catalog ----
-
 #define MAX_CATALOG 20
-#define MAX_NAME    20
+#define MAX_NAME    24
 #define MAX_FILE    32
 
 typedef struct {
@@ -40,124 +14,116 @@ typedef struct {
     char filename[MAX_FILE];
     int  filename_len;
     int  installed;
-} catalog_entry_t;
+} entry_t;
 
-static catalog_entry_t catalog[MAX_CATALOG];
-static int catalog_count;
-
-// ---- List layout ----
-
-#define LIST_TOP    20
-#define LIST_LEFT   16
-#define LIST_W      128
-#define ITEM_H      13
-#define VISIBLE     5
-
-// ---- Stars background ----
-
-#define NUM_STARS 25
-static float star_x[NUM_STARS];
-static float star_y[NUM_STARS];
-static float star_speed[NUM_STARS];
-static float star_bri[NUM_STARS];
+static entry_t catalog[MAX_CATALOG];
+static int cat_count;
 
 // ---- State ----
-
-typedef enum {
-    STATE_WAITING_WIFI,
-    STATE_LOADING_INDEX,
-    STATE_READY,
-    STATE_INSTALLING,
-    STATE_INDEX_ERROR,
-} store_state_t;
-
-static store_state_t state;
-static int http_handle;
-static int scroll;
+typedef enum { S_WIFI, S_LOADING, S_READY, S_INSTALLING, S_ERROR } state_t;
+static state_t state;
+static int http_h = -1;
+static int scroll_pos;
 static float t;
 
-static int install_active;
-static int last_install_status;
-static char status_msg[32];
-static int status_len;
-static float install_anim;
-
-// Accent colors for items
-static unsigned int item_colors[6];
-
-// Buttons
-static pxl_button_t item_btns[VISIBLE];
-static pxl_button_t btn_up;
-static pxl_button_t btn_down;
-static pxl_button_t btn_refresh;
-
-// Base URL
 static char base_url[128];
 static char full_url[256];
+static char status_msg[40];
+static int  status_len;
+static int  install_idx = -1;
+static int  last_ist;
+static float install_anim;
 
-static int screenW, screenH;
+// ---- Starfield (3-layer parallax) ----
+#define NSTARS 50
+static float star_x[NSTARS], star_y[NSTARS];
+static float star_sp[NSTARS], star_br[NSTARS];
+static int   star_layer[NSTARS];
+
+// ---- Sine scroller ----
+static float scroller_off;
+static const char SCROLLER[] =
+    "     *** PIXELITL FACE STORE ***     "
+    "DOWNLOAD FACES FOR YOUR DISPLAY!     "
+    "SWIPE UP/DOWN TO BROWSE -- TAP TO INSTALL     "
+    "GREETS TO ALL DEMOSCENERS AND PIXEL ARTISTS!     "
+    "CODED WITH LOVE FOR ESP32-S3     ";
+
+// ---- Layout ----
+#define SW        200
+#define SH        120
+#define COPPER_H  4
+#define LOGO_Y    5
+#define LIST_X    4
+#define LIST_Y    26
+#define LIST_W    112
+#define ITEM_H    9
+#define VISIBLE   8
+#define NAV_X     120
+#define NAV_W     14
+#define INFO_X    138
+#define INFO_Y    26
+#define INFO_W    58
+#define SCROLL_Y  106
+
+// ---- Buttons ----
+static pxl_button_t item_btns[VISIBLE];
+static pxl_button_t btn_up, btn_down, btn_refresh;
+
+// ---- Index buffer ----
+static char index_buf[2048];
+
+// ---- Helpers ----
 
 static void set_status(const char *msg) {
     status_len = pxl_strcpy(status_msg, sizeof(status_msg), msg);
 }
 
-static void build_url(const char *path, int path_len) {
-    int base_len = pxl_strlen(base_url);
-    int i = pxl_memcpy(full_url, base_url, base_len);
-    i += pxl_memcpy(full_url + i, path, path_len < 255 - i ? path_len : 255 - i);
+static void build_url(const char *path, int plen) {
+    int blen = pxl_strlen(base_url);
+    int i = pxl_memcpy(full_url, base_url, blen);
+    i += pxl_memcpy(full_url + i, path, plen < 255 - i ? plen : 255 - i);
     full_url[i] = '\0';
 }
 
-// ---- Index parsing ----
-
 static void parse_index(const char *data, int len) {
-    catalog_count = 0;
+    cat_count = 0;
     int i = 0;
-    while (i < len && catalog_count < MAX_CATALOG) {
-        int name_start = i;
+    while (i < len && cat_count < MAX_CATALOG) {
+        int ns = i;
         while (i < len && data[i] != '|' && data[i] != '\n' && data[i] != '\r') i++;
         if (i >= len || data[i] != '|') {
             while (i < len && data[i] != '\n') i++;
             if (i < len) i++;
             continue;
         }
-        int name_len = i - name_start;
+        int nl = i - ns;
         i++;
-        int file_start = i;
+        int fs = i;
         while (i < len && data[i] != '\n' && data[i] != '\r') i++;
-        int file_len = i - file_start;
+        int fl = i - fs;
         while (i < len && (data[i] == '\n' || data[i] == '\r')) i++;
-
-        if (name_len > 0 && name_len < MAX_NAME && file_len > 0 && file_len < MAX_FILE) {
-            catalog_entry_t *e = &catalog[catalog_count];
-            pxl_memcpy(e->name, data + name_start, name_len);
-            e->name[name_len] = '\0';
-            e->name_len = name_len;
-            pxl_memcpy(e->filename, data + file_start, file_len);
-            e->filename[file_len] = '\0';
-            e->filename_len = file_len;
-            catalog_count++;
+        if (nl > 0 && nl < MAX_NAME && fl > 0 && fl < MAX_FILE) {
+            entry_t *e = &catalog[cat_count];
+            pxl_memcpy(e->name, data + ns, nl);
+            e->name[nl] = '\0';
+            e->name_len = nl;
+            pxl_memcpy(e->filename, data + fs, fl);
+            e->filename[fl] = '\0';
+            e->filename_len = fl;
+            e->installed = 0;
+            cat_count++;
         }
     }
 }
 
-static int pxl_streq(const char *a, const char *b) {
-    int i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return 0;
-        i++;
-    }
-    return a[i] == b[i];
-}
-
 static void refresh_installed(void) {
     int n = face_count();
-    char name_buf[MAX_NAME];
-    for (int c = 0; c < catalog_count; c++) {
+    char buf[MAX_NAME];
+    for (int c = 0; c < cat_count; c++) {
         catalog[c].installed = 0;
         for (int f = 0; f < n; f++) {
-            int len = face_get_name(f, name_buf, sizeof(name_buf));
-            if (len > 0 && pxl_streq(catalog[c].name, name_buf)) {
+            if (face_get_name(f, buf, sizeof(buf)) > 0 && pxl_streq(catalog[c].name, buf)) {
                 catalog[c].installed = 1;
                 break;
             }
@@ -166,173 +132,157 @@ static void refresh_installed(void) {
 }
 
 static void setup_item_buttons(void) {
-    int visible = catalog_count - scroll;
-    if (visible > VISIBLE) visible = VISIBLE;
-
-    for (int i = 0; i < VISIBLE; i++) {
-        int iy = LIST_TOP + i * ITEM_H;
-        if (i < visible) {
-            int idx = scroll + i;
-            unsigned int ac = item_colors[idx % 6];
-            pxl_button(&item_btns[i], LIST_LEFT, iy, LIST_W, ITEM_H - 1,
-                       catalog[idx].name, dim_color(ac, 0.15f), rgb(200, 205, 230));
-            item_btns[i].pressed_bg = dim_color(ac, 0.35f);
-            item_btns[i].pressed_fg = rgb(255, 255, 255);
-        }
+    int vis = cat_count - scroll_pos;
+    if (vis > VISIBLE) vis = VISIBLE;
+    for (int i = 0; i < vis; i++) {
+        int idx = scroll_pos + i;
+        int iy = LIST_Y + i * ITEM_H;
+        pxl_button(&item_btns[i], LIST_X, iy, LIST_W, ITEM_H - 1,
+                   catalog[idx].name, rgb(12, 10, 28), rgb(180, 185, 210));
     }
 }
 
 static void fetch_index(void) {
     build_url("index.txt", 9);
-    http_handle = http_get_str(full_url);
-    state = STATE_LOADING_INDEX;
+    http_h = http_get_str(full_url);
+    state = S_LOADING;
     set_status("CONNECTING...");
-    catalog_count = 0;
-    scroll = 0;
+    cat_count = 0;
+    scroll_pos = 0;
 }
 
 static void init_stars(void) {
-    for (int i = 0; i < NUM_STARS; i++) {
-        star_x[i] = (float)(rand() % screenW);
-        star_y[i] = (float)(rand() % screenH);
-        star_speed[i] = 0.002f + (float)(rand() % 10) * 0.002f;
-        star_bri[i] = 0.2f + (float)(rand() % 60) * 0.01f;
+    for (int i = 0; i < NSTARS; i++) {
+        star_x[i] = (float)(rand() % SW);
+        star_y[i] = (float)(rand() % SH);
+        star_layer[i] = rand() % 3;
+        star_sp[i] = 0.3f + (float)star_layer[i] * 0.5f + (float)(rand() % 10) * 0.05f;
+        star_br[i] = 0.1f + (float)star_layer[i] * 0.25f + (float)(rand() % 20) * 0.01f;
     }
 }
 
-// ---- Exports ----
+// ======== EXPORTS ========
 
 __attribute__((export_name("app_init")))
 void app_init(void) {
-    set_resolution(1);  // HD 160x96
+    set_resolution(2);
     t = 0.0f;
-    screenW = width();
-    screenH = height();
     srand((int)millis());
 
     int len = kv_get_str("server", base_url, sizeof(base_url));
-    if (len <= 0) {
+    if (len <= 0)
         pxl_strcpy(base_url, sizeof(base_url), "http://192.168.1.124:4000/api/faces/");
-    }
 
-    item_colors[0] = rgb(80, 160, 255);
-    item_colors[1] = rgb(255, 120, 70);
-    item_colors[2] = rgb(80, 220, 130);
-    item_colors[3] = rgb(220, 100, 240);
-    item_colors[4] = rgb(255, 210, 50);
-    item_colors[5] = rgb(70, 210, 230);
-
-    // Scroll buttons (left of list)
-    unsigned int nav_bg = rgb(25, 22, 48);
-    unsigned int nav_fg = rgb(120, 110, 170);
-    pxl_button(&btn_up,   4, LIST_TOP, 10, 30, "^", nav_bg, nav_fg);
-    pxl_button(&btn_down,  4, LIST_TOP + 35, 10, 30, "v", nav_bg, nav_fg);
-
-    // Refresh button (bottom)
-    pxl_button(&btn_refresh, 55, 88, 50, 8, "REFRESH", rgb(25, 22, 48), rgb(100, 160, 100));
-
-    install_active = -1;
-    last_install_status = INSTALL_IDLE;
+    install_idx = -1;
+    last_ist = INSTALL_IDLE;
     install_anim = 0.0f;
-    scroll = 0;
+    scroll_pos = 0;
+    scroller_off = 0.0f;
+
+    // Nav buttons — tall side buttons next to list
+    unsigned int nav_bg = rgb(15, 13, 32);
+    unsigned int nav_fg = rgb(100, 140, 200);
+    int list_h = VISIBLE * ITEM_H;
+    int half_h = list_h / 2;
+    pxl_button(&btn_up,   NAV_X, LIST_Y, NAV_W, half_h, "^", nav_bg, nav_fg);
+    pxl_button(&btn_down, NAV_X, LIST_Y + half_h, NAV_W, half_h, "v", nav_bg, nav_fg);
+    pxl_button(&btn_refresh, INFO_X, 82, INFO_W, 9, "REFRESH", nav_bg, rgb(100, 160, 100));
+    btn_up.pressed_bg = rgb(30, 25, 60);
+    btn_down.pressed_bg = rgb(30, 25, 60);
+    btn_refresh.pressed_bg = rgb(25, 45, 30);
 
     init_stars();
-
-    state = STATE_WAITING_WIFI;
-    set_status("WAITING WIFI...");
+    state = S_WIFI;
+    set_status("AWAITING SIGNAL...");
 }
 
 __attribute__((export_name("app_wifi_ready")))
 void app_wifi_ready(void) {
-    if (state == STATE_WAITING_WIFI) {
-        fetch_index();
-    }
+    if (state == S_WIFI) fetch_index();
 }
-
-static char index_buf[2048];
 
 __attribute__((export_name("app_update")))
 void app_update(int frame, int dt) {
-    t += (float)dt * 0.001f;
     float dtf = (float)dt;
+    t += dtf * 0.001f;
 
-    // Animate stars
-    for (int i = 0; i < NUM_STARS; i++) {
-        star_x[i] -= star_speed[i] * dtf;
-        if (star_x[i] < -1.0f) {
-            star_x[i] = (float)screenW + (float)(rand() % 8);
-            star_y[i] = (float)(rand() % screenH);
-            star_speed[i] = 0.002f + (float)(rand() % 10) * 0.002f;
-            star_bri[i] = 0.2f + (float)(rand() % 60) * 0.01f;
+    // Stars
+    for (int i = 0; i < NSTARS; i++) {
+        star_x[i] -= star_sp[i] * dtf * 0.015f;
+        if (star_x[i] < -2.0f) {
+            star_x[i] = (float)SW + (float)(rand() % 10);
+            star_y[i] = (float)(rand() % SH);
         }
     }
 
-    if (state == STATE_WAITING_WIFI) return;
+    // Scroller
+    scroller_off += dtf * 0.04f;
+    int slen = pxl_strlen(SCROLLER);
+    float total_w = (float)(slen * PXL_FONT_W);
+    if (scroller_off > total_w) scroller_off -= total_w;
 
-    // ---- Index fetch ----
-    if (state == STATE_LOADING_INDEX) {
-        int st = http_status(http_handle);
+    if (state == S_WIFI) return;
+
+    // Index fetch
+    if (state == S_LOADING) {
+        int st = http_status(http_h);
         if (st == HTTP_DONE) {
-            int resp = http_response_code(http_handle);
+            int resp = http_response_code(http_h);
             if (resp == 200) {
-                int body_len = http_read(http_handle, index_buf, sizeof(index_buf) - 1);
-                if (body_len > 0) {
-                    index_buf[body_len] = '\0';
-                    parse_index(index_buf, body_len);
-                }
-                http_close(http_handle);
-                http_handle = -1;
-                if (catalog_count > 0) {
-                    state = STATE_READY;
-                    scroll = 0;
+                int blen = http_read(http_h, index_buf, sizeof(index_buf) - 1);
+                if (blen > 0) { index_buf[blen] = '\0'; parse_index(index_buf, blen); }
+                http_close(http_h); http_h = -1;
+                if (cat_count > 0) {
+                    state = S_READY;
                     refresh_installed();
                     setup_item_buttons();
                     set_status("");
                 } else {
-                    state = STATE_INDEX_ERROR;
-                    set_status("NO FACES FOUND");
+                    state = S_ERROR;
+                    set_status("EMPTY CATALOG");
                 }
             } else {
-                http_close(http_handle);
-                http_handle = -1;
-                state = STATE_INDEX_ERROR;
-                set_status("SERVER ERROR");
+                http_close(http_h); http_h = -1;
+                state = S_ERROR; set_status("SERVER ERROR");
             }
         } else if (st == HTTP_ERROR) {
-            http_close(http_handle);
-            http_handle = -1;
-            state = STATE_INDEX_ERROR;
-            set_status("CONNECTION FAILED");
+            http_close(http_h); http_h = -1;
+            state = S_ERROR; set_status("CONNECT FAILED");
         }
         return;
     }
 
-    // ---- Install polling ----
-    if (install_active >= 0) {
-        install_anim += (float)dt * 0.003f;
-        if (install_anim > 1.0f) install_anim -= 1.0f;
-
+    // Install polling (reset state if we returned from face_switch)
+    if (state == S_INSTALLING && install_idx < 0) {
+        state = S_READY;
+        refresh_installed();
+        setup_item_buttons();
+        set_status("");
+    }
+    if (install_idx >= 0) {
+        install_anim += dtf * 0.004f;
+        if (install_anim > 6.28f) install_anim -= 6.28f;
         int ist = face_install_status();
-        if (ist != last_install_status) {
-            last_install_status = ist;
+        if (ist != last_ist) {
+            last_ist = ist;
             if (ist == INSTALL_DOWNLOADING) set_status("DOWNLOADING...");
             else if (ist == INSTALL_LOADING) set_status("LOADING...");
             else if (ist == INSTALL_OK) set_status("INSTALLED!");
             else if (ist == INSTALL_ERROR) set_status("FAILED!");
         }
-        if (ist == INSTALL_OK && (frame % 90 == 0)) {
-            int new_face = face_count() - 1;
+        if (ist == INSTALL_OK && (frame % 60 == 0)) {
+            int nf = face_count() - 1;
             face_install_reset();
-            install_active = -1;
-            last_install_status = INSTALL_IDLE;
-            face_switch(new_face);
+            install_idx = -1;
+            last_ist = INSTALL_IDLE;
+            face_switch(nf);
             return;
         }
-        if (ist == INSTALL_ERROR && (frame % 120 == 0)) {
+        if (ist == INSTALL_ERROR && (frame % 90 == 0)) {
             face_install_reset();
-            install_active = -1;
-            last_install_status = INSTALL_IDLE;
-            state = STATE_READY;
+            install_idx = -1;
+            last_ist = INSTALL_IDLE;
+            state = S_READY;
             refresh_installed();
             setup_item_buttons();
             set_status("");
@@ -340,281 +290,335 @@ void app_update(int frame, int dt) {
         return;
     }
 
-    // ---- Error state ----
-    if (state == STATE_INDEX_ERROR) {
-        if (pxl_button_clicked(&btn_refresh)) fetch_index();
+    // Error: tap to retry
+    if (state == S_ERROR) {
+        if (get_gesture() == GESTURE_TAP) fetch_index();
         return;
     }
-    if (state != STATE_READY) return;
+    if (state != S_READY) return;
 
-    // ---- Swipe up/down to scroll ----
+    // Swipe scroll
     int gesture = get_gesture();
-    if (gesture == GESTURE_SWIPE_UP && scroll + VISIBLE < catalog_count) {
-        scroll++;
+    if (gesture == GESTURE_SWIPE_UP && scroll_pos + VISIBLE < cat_count) {
+        scroll_pos++;
         setup_item_buttons();
     }
-    if (gesture == GESTURE_SWIPE_DOWN && scroll > 0) {
-        scroll--;
-        setup_item_buttons();
-    }
-
-    // ---- Item button clicks ----
-    int visible = catalog_count - scroll;
-    if (visible > VISIBLE) visible = VISIBLE;
-
-    for (int i = 0; i < visible; i++) {
-        if (pxl_button_clicked(&item_btns[i])) {
-            int idx = scroll + i;
-            if (catalog[idx].installed) break;  // already installed, ignore
-            build_url(catalog[idx].filename, catalog[idx].filename_len);
-            int ret = face_install(full_url, pxl_strlen(full_url),
-                                   catalog[idx].name, catalog[idx].name_len);
-            if (ret == 0) {
-                install_active = idx;
-                last_install_status = INSTALL_DOWNLOADING;
-                state = STATE_INSTALLING;
-                install_anim = 0.0f;
-                set_status("STARTING...");
-            }
-            return;
-        }
-    }
-
-    // ---- Scroll buttons ----
-    if (pxl_button_clicked(&btn_up) && scroll > 0) {
-        scroll--;
-        setup_item_buttons();
-    }
-    if (pxl_button_clicked(&btn_down) && scroll + VISIBLE < catalog_count) {
-        scroll++;
+    if (gesture == GESTURE_SWIPE_DOWN && scroll_pos > 0) {
+        scroll_pos--;
         setup_item_buttons();
     }
 
-    // ---- Refresh ----
+    // Button scroll
+    if (pxl_button_clicked(&btn_up) && scroll_pos > 0) {
+        scroll_pos--;
+        setup_item_buttons();
+    }
+    if (pxl_button_clicked(&btn_down) && scroll_pos + VISIBLE < cat_count) {
+        scroll_pos++;
+        setup_item_buttons();
+    }
+
+    // Refresh
     if (pxl_button_clicked(&btn_refresh)) {
         fetch_index();
     }
+
+    // Item clicks
+    int vis = cat_count - scroll_pos;
+    if (vis > VISIBLE) vis = VISIBLE;
+    for (int i = 0; i < vis; i++) {
+        if (pxl_button_clicked(&item_btns[i])) {
+            int idx = scroll_pos + i;
+            if (idx < cat_count && !catalog[idx].installed) {
+                build_url(catalog[idx].filename, catalog[idx].filename_len);
+                int ret = face_install(full_url, pxl_strlen(full_url),
+                                       catalog[idx].name, catalog[idx].name_len);
+                if (ret == 0) {
+                    install_idx = idx;
+                    last_ist = INSTALL_DOWNLOADING;
+                    state = S_INSTALLING;
+                    install_anim = 0.0f;
+                    set_status("STARTING...");
+                }
+            }
+            break;
+        }
+    }
 }
 
-// ---- Drawing ----
+// ======== DRAWING ========
 
 static void draw_stars(void) {
-    for (int i = 0; i < NUM_STARS; i++) {
-        int sx = (int)star_x[i];
-        int sy = (int)star_y[i];
-        if (sx < 0 || sx >= screenW || sy < 0 || sy >= screenH) continue;
-
-        float twinkle = sinf(t * 2.0f + star_bri[i] * 20.0f) * 0.3f + 0.7f;
-        float bri = star_bri[i] * twinkle;
-        unsigned int c = dim_color(rgb(180, 200, 255), bri);
+    for (int i = 0; i < NSTARS; i++) {
+        int sx = (int)star_x[i], sy = (int)star_y[i];
+        if (sx < 0 || sx >= SW || sy < 0 || sy >= SH) continue;
+        float tw = sinf(t * 3.0f + star_br[i] * 15.0f) * 0.3f + 0.7f;
+        float bri = star_br[i] * tw;
+        unsigned int c;
+        if (star_layer[i] == 0) c = dim_color(rgb(80, 100, 140), bri);
+        else if (star_layer[i] == 1) c = dim_color(rgb(140, 160, 200), bri);
+        else c = dim_color(rgb(200, 220, 255), bri);
         set_pixel(sx, sy, c);
-
-        if (star_bri[i] > 0.6f && twinkle > 0.8f) {
-            unsigned int dc = dim_color(c, 0.3f);
+        // Cross sparkle on bright near stars
+        if (star_layer[i] == 2 && tw > 0.85f) {
+            unsigned int dc = dim_color(c, 0.2f);
             if (sx > 0) set_pixel(sx - 1, sy, dc);
-            if (sx < screenW - 1) set_pixel(sx + 1, sy, dc);
+            if (sx < SW-1) set_pixel(sx + 1, sy, dc);
+            if (sy > 0) set_pixel(sx, sy - 1, dc);
+            if (sy < SH-1) set_pixel(sx, sy + 1, dc);
         }
     }
 }
 
-static void draw_mountains(void) {
-    unsigned int m1 = rgb(15, 18, 35);
-    unsigned int m2 = rgb(10, 12, 28);
-
-    int peaks1[] = {92,88,82,78,80,76,72,75,79,83,80,77,74,78,82,86,90,92};
-    for (int i = 0; i < 17; i++) {
-        int x = i * 10;
-        for (int px = 0; px < 10; px++) {
-            int h = peaks1[i] + (peaks1[i+1] - peaks1[i]) * px / 10;
-            fill_rect(x + px, h, 1, screenH - h, m2);
-        }
-    }
-
-    int peaks2[] = {94,90,87,84,88,86,82,85,89,91,86,84,87,90,93,94,95,94};
-    for (int i = 0; i < 17; i++) {
-        int x = i * 10;
-        for (int px = 0; px < 10; px++) {
-            int h = peaks2[i] + (peaks2[i+1] - peaks2[i]) * px / 10;
-            fill_rect(x + px, h, 1, screenH - h, m1);
-        }
+static void draw_copper(void) {
+    for (int i = 0; i < COPPER_H; i++) {
+        float hue = t * 60.0f + (float)i * 45.0f;
+        float bri = 0.5f + sinf(t * 2.5f + (float)i * 1.2f) * 0.2f;
+        draw_line_h(0, i, SW, hsv(hue, 0.7f, bri));
     }
 }
 
-static void draw_item_styled(int slot) {
-    int idx = scroll + slot;
-    if (idx >= catalog_count) return;
+static void draw_logo(void) {
+    const char *logo = "PIXELITL";
+    int nch = 8;
+    int bx = (SW - nch * PXL_FONT_BIG_W) / 2;
+    for (int i = 0; i < nch; i++) {
+        float wave = sinf(t * 3.0f + (float)i * 0.8f) * 2.0f;
+        float hue = t * 40.0f + (float)i * 35.0f;
+        int cx = bx + i * PXL_FONT_BIG_W;
+        int cy = LOGO_Y + (int)wave;
+        draw_text_big(cx + 1, cy + 1, &logo[i], 1, rgb(8, 4, 20));
+        draw_text_big(cx, cy, &logo[i], 1, hsv(hue, 0.35f, 1.0f));
+    }
+    // Subtitle
+    float sp = sinf(t * 1.5f) * 0.15f + 0.55f;
+    draw_str_centered(0, SW, 21, ">> FACE STORE <<", dim_color(rgb(0, 255, 200), sp));
+}
 
-    pxl_button_t *btn = &item_btns[slot];
-    unsigned int ac = item_colors[idx % 6];
-    int inst = catalog[idx].installed;
-    int pressed = !inst && is_pressed() && _pxl_btn_inside(btn);
+static void draw_sep(int y, unsigned int c) {
+    draw_line_h(0, y, SW, c);
+    draw_line_h(0, y + 1, SW, dim_color(c, 0.4f));
+}
 
-    // Background
-    unsigned int bg;
-    if (inst) bg = dim_color(rgb(30, 35, 30), 0.5f);
-    else bg = pressed ? dim_color(ac, 0.35f) : dim_color(ac, 0.12f);
-    fill_rect(btn->x, btn->y, btn->w, btn->h, bg);
+static void draw_list(void) {
+    // Panel
+    fill_rect(LIST_X - 1, LIST_Y - 1, LIST_W + 2, VISIBLE * ITEM_H + 2, rgb(8, 6, 18));
+    draw_rect(LIST_X - 1, LIST_Y - 1, LIST_W + 2, VISIBLE * ITEM_H + 2, rgb(30, 40, 70));
 
-    // Left accent bar
-    unsigned int bar = inst ? rgb(40, 120, 60) : (pressed ? ac : dim_color(ac, 0.6f));
-    fill_rect(btn->x, btn->y, 2, btn->h, bar);
+    int vis = cat_count - scroll_pos;
+    if (vis > VISIBLE) vis = VISIBLE;
 
-    // Border bottom
-    draw_line_h(btn->x, btn->y + btn->h, btn->w, rgb(20, 18, 38));
+    // Raster highlight (subtle moving bar)
+    float rp = sinf(t * 0.8f) * 0.5f + 0.5f;
+    int raster_slot = (int)(rp * (float)(VISIBLE - 1));
 
-    // Name text
-    unsigned int fg;
-    if (inst) fg = rgb(80, 140, 90);
-    else fg = pressed ? rgb(255, 255, 255) : rgb(200, 205, 230);
-    draw_str(btn->x + 6, btn->y + 3, catalog[idx].name, fg);
+    for (int i = 0; i < vis; i++) {
+        int idx = scroll_pos + i;
+        entry_t *e = &catalog[idx];
+        int iy = LIST_Y + i * ITEM_H;
+        int inst = e->installed;
 
-    // Installed checkmark
-    if (inst) {
-        draw_str(btn->x + btn->w - 10, btn->y + 3, "*", rgb(60, 180, 80));
+        int hover = !inst && is_pressed() && _pxl_btn_inside(&item_btns[i]);
+
+        // Background
+        unsigned int bg;
+        if (hover) bg = rgb(30, 25, 55);
+        else if (i == raster_slot) bg = rgb(14, 12, 34);
+        else bg = (i & 1) ? rgb(10, 8, 24) : rgb(12, 10, 28);
+        fill_rect(LIST_X, iy, LIST_W, ITEM_H - 1, bg);
+
+        // Left accent bar (color-cycling)
+        float hue = (float)(idx * 47) + t * 10.0f;
+        unsigned int accent = hsv(hue, 0.7f, inst ? 0.25f : 0.75f);
+        fill_rect(LIST_X, iy, 2, ITEM_H - 1, accent);
+
+        // Name
+        unsigned int fg;
+        if (inst) fg = rgb(50, 130, 70);
+        else if (hover) fg = rgb(255, 255, 255);
+        else fg = rgb(170, 175, 200);
+        draw_text(LIST_X + 5, iy + 1, e->name, e->name_len, fg);
+
+        // Status tag
+        int tag_x = LIST_X + LIST_W - 24;
+        if (inst) {
+            draw_str(tag_x, iy + 1, "[OK]", rgb(40, 150, 60));
+        } else {
+            unsigned int ac = hover ? rgb(255, 220, 100) : dim_color(accent, 0.5f);
+            draw_str(tag_x, iy + 1, "[>>]", ac);
+        }
+    }
+
+    // Empty slots
+    for (int i = vis; i < VISIBLE; i++) {
+        int iy = LIST_Y + i * ITEM_H;
+        fill_rect(LIST_X, iy, LIST_W, ITEM_H - 1, rgb(6, 5, 14));
+        for (int d = 0; d < 3; d++)
+            set_pixel(LIST_X + LIST_W/2 - 4 + d * 4, iy + 4, rgb(20, 18, 35));
+    }
+
+    // Scrollbar
+    if (cat_count > VISIBLE) {
+        int sbx = LIST_X + LIST_W + 1;
+        int sbh = VISIBLE * ITEM_H;
+        fill_rect(sbx, LIST_Y, 2, sbh, rgb(12, 10, 25));
+        int th = (VISIBLE * sbh) / cat_count;
+        if (th < 4) th = 4;
+        int maxs = cat_count - VISIBLE;
+        int thumb_y = LIST_Y + (maxs > 0 ? (scroll_pos * (sbh - th)) / maxs : 0);
+        fill_rect(sbx, thumb_y, 2, th, hsv(t * 30.0f, 0.5f, 0.6f));
+    }
+}
+
+static void draw_info(void) {
+    fill_rect(INFO_X - 1, INFO_Y - 1, INFO_W + 2, 54, rgb(8, 6, 18));
+    draw_rect(INFO_X - 1, INFO_Y - 1, INFO_W + 2, 54, rgb(30, 40, 70));
+
+    // Header
+    unsigned int hc = dim_color(rgb(0, 200, 180), 0.6f + sinf(t * 2.0f) * 0.15f);
+    draw_str(INFO_X + 2, INFO_Y + 1, "STATUS", hc);
+    draw_line_h(INFO_X, INFO_Y + 9, INFO_W, rgb(25, 35, 60));
+
+    draw_str(INFO_X + 2, INFO_Y + 12, "FACES", rgb(80, 75, 120));
+    draw_int(INFO_X + 38, INFO_Y + 12, face_count(), rgb(255, 200, 50));
+
+    draw_str(INFO_X + 2, INFO_Y + 21, "AVAIL", rgb(80, 75, 120));
+    draw_int(INFO_X + 38, INFO_Y + 21, cat_count, rgb(0, 230, 180));
+
+    if (cat_count > 0) {
+        draw_str(INFO_X + 2, INFO_Y + 30, "POS", rgb(80, 75, 120));
+        char pg[8];
+        int pl = pxl_itoa(scroll_pos + 1, pg, sizeof(pg));
+        draw_text(INFO_X + 26, INFO_Y + 30, pg, pl, rgb(160, 130, 220));
+    }
+
+    // Connection dot
+    int dy = INFO_Y + 42;
+    float pulse = sinf(t * 4.0f) * 0.3f + 0.7f;
+    if (state == S_READY || state == S_INSTALLING) {
+        fill_rect(INFO_X + 2, dy + 1, 3, 3, dim_color(rgb(0, 255, 100), pulse));
+        draw_str(INFO_X + 8, dy, "ONLINE", rgb(0, 180, 80));
+    } else if (state == S_ERROR) {
+        fill_rect(INFO_X + 2, dy + 1, 3, 3, dim_color(rgb(255, 50, 50), pulse));
+        draw_str(INFO_X + 8, dy, "ERROR", rgb(255, 60, 60));
+    } else {
+        fill_rect(INFO_X + 2, dy + 1, 3, 3, dim_color(rgb(255, 200, 50), pulse));
+        draw_str(INFO_X + 8, dy, "WAIT", rgb(200, 180, 100));
+    }
+}
+
+static void draw_scroller(void) {
+    int slen = pxl_strlen(SCROLLER);
+    int start_ch = (int)(scroller_off / (float)PXL_FONT_W);
+    float sub_off = scroller_off - (float)(start_ch * PXL_FONT_W);
+    int nvis = SW / PXL_FONT_W + 2;
+
+    for (int i = 0; i < nvis; i++) {
+        int ci = (start_ch + i) % slen;
+        int cx = (int)((float)(i * PXL_FONT_W) - sub_off);
+        float wave = sinf(t * 4.0f + (float)(start_ch + i) * 0.25f) * 3.0f;
+        int cy = SCROLL_Y + (int)wave;
+        if (cx >= -PXL_FONT_W && cx < SW && cy >= 100 && cy < SH) {
+            float hue = (float)(start_ch + i) * 7.0f + t * 50.0f;
+            draw_text(cx, cy, &SCROLLER[ci], 1, hsv(hue, 0.45f, 0.85f));
+        }
     }
 }
 
 __attribute__((export_name("app_draw")))
 void app_draw(void) {
-    // Sky gradient
-    for (int y = 0; y < screenH; y++) {
-        draw_line_h(0, y, screenW, rgb(5 + y/12, 4 + y/16, 18 + y/6));
-    }
-
-    draw_mountains();
+    clear(rgb(5, 3, 14));
     draw_stars();
+    draw_copper();
+    draw_logo();
+    draw_sep(24, rgb(35, 50, 85));
 
-    // === Header ===
-    fill_rect(0, 0, screenW, 17, dim_color(rgb(10, 8, 25), 0.92f));
-    draw_line_h(0, 17, screenW, rgb(45, 38, 75));
-
-    float hue = t * 15.0f;
-    draw_str_big(3, 0, "PIXELITL", hsv(hue, 0.3f, 1.0f));
-
-    int total = face_count();
-    char cnt_buf[4];
-    int cnt_len = itoa_simple(total, cnt_buf, sizeof(cnt_buf));
-    fill_rect(screenW - 24, 4, 20, 9, rgb(30, 25, 55));
-    draw_text(screenW - 20, 5, cnt_buf, cnt_len, rgb(160, 140, 220));
-
-    // === Content ===
-
-    if (state == STATE_WAITING_WIFI) {
-        fill_rect(20, 35, 120, 25, dim_color(rgb(10, 8, 25), 0.88f));
-        draw_rect(20, 35, 120, 25, rgb(40, 35, 70));
-        float pulse = sinf(t * 3.0f) * 0.3f + 0.7f;
-        unsigned int wc = dim_color(rgb(100, 180, 255), pulse);
-        int dots = ((int)(t * 2.0f)) % 4;
-        draw_str(32, 43, "CONNECTING", wc);
-        for (int d = 0; d < dots; d++)
-            draw_str(92 + d * 6, 43, ".", wc);
+    if (state == S_WIFI) {
+        fill_rect(35, 42, 130, 28, rgb(8, 6, 20));
+        draw_rect(35, 42, 130, 28, rgb(35, 50, 85));
+        float p = sinf(t * 3.0f) * 0.3f + 0.7f;
+        unsigned int wc = dim_color(rgb(0, 200, 255), p);
+        draw_str_centered(35, 130, 50, "AWAITING SIGNAL", wc);
+        char dots[5];
+        int nd = ((int)(t * 2.0f)) % 4;
+        for (int d = 0; d < nd; d++) dots[d] = '.';
+        dots[nd] = '\0';
+        draw_str_centered(35, 130, 58, dots, wc);
     }
-    else if (state == STATE_LOADING_INDEX) {
-        fill_rect(20, 35, 120, 25, dim_color(rgb(10, 8, 25), 0.88f));
-        draw_rect(20, 35, 120, 25, rgb(40, 35, 70));
-        draw_str(40, 38, "LOADING", rgb(100, 180, 255));
-        int dots = ((int)(t * 3.0f)) % 4;
-        for (int d = 0; d < dots; d++)
-            draw_str(82 + d * 6, 38, ".", rgb(100, 180, 255));
+    else if (state == S_LOADING) {
+        fill_rect(35, 42, 130, 32, rgb(8, 6, 20));
+        draw_rect(35, 42, 130, 32, rgb(35, 50, 85));
+        draw_str_centered(35, 130, 46, "LOADING INDEX", rgb(0, 200, 255));
+        // Animated rainbow bar
+        int bx = 45, bw = 110, by = 58;
+        fill_rect(bx, by, bw, 5, rgb(12, 10, 25));
+        draw_rect(bx, by, bw, 5, rgb(30, 40, 65));
+        float pos = sinf(t * 5.0f) * 0.5f + 0.5f;
+        int pw = 25;
+        int px = bx + 1 + (int)(pos * (float)(bw - 2 - pw));
+        for (int x = 0; x < pw; x++) {
+            fill_rect(px + x, by + 1, 1, 3, hsv(t * 80.0f + (float)x * 5.0f, 0.6f, 0.7f));
+        }
     }
-    else if (state == STATE_INDEX_ERROR) {
-        fill_rect(20, 30, 120, 35, dim_color(rgb(10, 8, 25), 0.88f));
-        draw_rect(20, 30, 120, 35, rgb(60, 30, 30));
-        draw_str(52, 36, "OOPS!", rgb(255, 80, 80));
-        draw_text(24, 48, status_msg, status_len, rgb(120, 100, 140));
-        pxl_button_draw(&btn_refresh);
+    else if (state == S_ERROR) {
+        fill_rect(30, 38, 140, 42, rgb(8, 6, 20));
+        draw_rect(30, 38, 140, 42, rgb(70, 25, 25));
+        // Glitch effect
+        float glitch = sinf(t * 12.0f);
+        int gx = (glitch > 0.9f) ? (rand() % 3 - 1) : 0;
+        draw_str_big_centered(30 + gx, 140, 40, "ERROR", rgb(255, 50, 50));
+        draw_text((SW - status_len * PXL_FONT_W) / 2, 58,
+                  status_msg, status_len, rgb(160, 100, 100));
+        float p = sinf(t * 2.0f) * 0.3f + 0.7f;
+        draw_str_centered(30, 140, 68, "TAP TO RETRY", dim_color(rgb(0, 220, 200), p));
     }
-    else if (state == STATE_INSTALLING) {
-        fill_rect(15, 25, 130, 46, dim_color(rgb(10, 8, 25), 0.92f));
-        draw_rect(15, 25, 130, 46, rgb(50, 45, 85));
-
-        if (install_active >= 0 && install_active < catalog_count) {
-            catalog_entry_t *e = &catalog[install_active];
-            unsigned int ac = item_colors[install_active % 6];
-
-            fill_rect(16, 26, 128, 3, ac);
-
-            int npx = (screenW - e->name_len * 6) / 2;
-            draw_str(npx, 34, e->name, rgb(255, 255, 255));
-
-            int bx = 28, bw = 104, by = 48;
-            fill_rect(bx, by, bw, 5, rgb(12, 10, 25));
-            draw_rect(bx, by, bw, 5, rgb(45, 40, 75));
-
-            if (last_install_status == INSTALL_OK) {
-                fill_rect(bx+1, by+1, bw-2, 3, rgb(70, 255, 120));
-            } else if (last_install_status == INSTALL_ERROR) {
-                fill_rect(bx+1, by+1, bw-2, 3, rgb(255, 70, 70));
-            } else {
-                int hw = bw/3;
-                float pos = (sinf(install_anim * 6.28f) + 1.0f) * 0.5f;
-                fill_rect(bx+1+(int)(pos*(float)(bw-2-hw)), by+1, hw, 3, dim_color(ac, 0.8f));
+    else if (state == S_INSTALLING) {
+        fill_rect(20, 32, 160, 52, rgb(8, 6, 20));
+        draw_rect(20, 32, 160, 52, rgb(45, 40, 85));
+        if (install_idx >= 0 && install_idx < cat_count) {
+            entry_t *e = &catalog[install_idx];
+            float hue = (float)(install_idx * 47);
+            // Raster bars
+            for (int i = 0; i < 3; i++) {
+                draw_line_h(21, 33 + i, 158,
+                    hsv(hue + (float)i * 20.0f + t * 40.0f, 0.6f, 0.3f - (float)i * 0.08f));
             }
-
-            unsigned int sc = rgb(140, 130, 170);
-            if (last_install_status == INSTALL_OK) sc = rgb(70, 255, 120);
-            else if (last_install_status == INSTALL_ERROR) sc = rgb(255, 70, 70);
-            draw_text((screenW - status_len*6)/2, 58, status_msg, status_len, sc);
+            draw_str_centered(20, 160, 40, e->name, rgb(255, 255, 255));
+            // Progress bar
+            int bx = 35, bw = 130, by = 54;
+            fill_rect(bx, by, bw, 7, rgb(10, 8, 22));
+            draw_rect(bx, by, bw, 7, rgb(35, 30, 65));
+            if (last_ist == INSTALL_OK) {
+                fill_rect(bx + 1, by + 1, bw - 2, 5, rgb(0, 255, 100));
+            } else if (last_ist == INSTALL_ERROR) {
+                fill_rect(bx + 1, by + 1, bw - 2, 5, rgb(200, 40, 40));
+            } else {
+                float apos = sinf(install_anim) * 0.5f + 0.5f;
+                int pw = bw / 3;
+                int px = bx + 1 + (int)(apos * (float)(bw - 2 - pw));
+                for (int x = 0; x < pw; x++) {
+                    float xf = (float)x / (float)pw;
+                    fill_rect(px + x, by + 1, 1, 5,
+                        hsv(hue + xf * 60.0f + t * 100.0f, 0.55f, 0.75f));
+                }
+            }
+            unsigned int sc;
+            if (last_ist == INSTALL_OK) sc = rgb(0, 255, 120);
+            else if (last_ist == INSTALL_ERROR) sc = rgb(255, 50, 50);
+            else sc = rgb(150, 140, 190);
+            draw_text((SW - status_len * PXL_FONT_W) / 2, 68,
+                      status_msg, status_len, sc);
         }
     }
     else {
-        // === READY: List with buttons ===
-
-        // List panel background
-        fill_rect(LIST_LEFT - 2, LIST_TOP - 2, LIST_W + 4, VISIBLE * ITEM_H + 4,
-                  dim_color(rgb(8, 6, 20), 0.88f));
-        draw_rect(LIST_LEFT - 2, LIST_TOP - 2, LIST_W + 4, VISIBLE * ITEM_H + 4,
-                  rgb(35, 30, 60));
-
-        // Draw list items
-        int visible = catalog_count - scroll;
-        if (visible > VISIBLE) visible = VISIBLE;
-
-        for (int i = 0; i < visible; i++) {
-            draw_item_styled(i);
-        }
-
-        // Draw empty slots
-        for (int i = visible; i < VISIBLE; i++) {
-            int iy = LIST_TOP + i * ITEM_H;
-            fill_rect(LIST_LEFT, iy, LIST_W, ITEM_H - 1, rgb(10, 8, 22));
-        }
-
-        // Scroll buttons
-        int can_up = (scroll > 0);
-        int can_down = (scroll + VISIBLE < catalog_count);
-
-        // Up button
-        unsigned int up_fg = can_up ? rgb(150, 140, 200) : rgb(40, 35, 60);
-        fill_rect(btn_up.x, btn_up.y, btn_up.w, btn_up.h, rgb(18, 16, 35));
-        draw_rect(btn_up.x, btn_up.y, btn_up.w, btn_up.h, rgb(35, 30, 60));
-        draw_str(btn_up.x + 2, btn_up.y + 12, "^", up_fg);
-
-        // Down button
-        unsigned int dn_fg = can_down ? rgb(150, 140, 200) : rgb(40, 35, 60);
-        fill_rect(btn_down.x, btn_down.y, btn_down.w, btn_down.h, rgb(18, 16, 35));
-        draw_rect(btn_down.x, btn_down.y, btn_down.w, btn_down.h, rgb(35, 30, 60));
-        draw_str(btn_down.x + 2, btn_down.y + 12, "v", dn_fg);
-
-        // Scrollbar
-        if (catalog_count > VISIBLE) {
-            int tx = LIST_LEFT + LIST_W + 3;
-            int th = VISIBLE * ITEM_H;
-            fill_rect(tx, LIST_TOP, 2, th, rgb(15, 12, 30));
-            int thumb_h = (VISIBLE * th) / catalog_count;
-            if (thumb_h < 4) thumb_h = 4;
-            int max_s = catalog_count - VISIBLE;
-            int thumb_y = LIST_TOP + (max_s > 0 ? (scroll * (th - thumb_h)) / max_s : 0);
-            fill_rect(tx, thumb_y, 2, thumb_h, rgb(80, 70, 140));
-        }
-
-        // Refresh + info
+        draw_list();
+        draw_info();
+        pxl_button_draw(&btn_up);
+        pxl_button_draw(&btn_down);
         pxl_button_draw(&btn_refresh);
-
-        char info[8];
-        int ilen = 0;
-        ilen += itoa_simple(catalog_count, info + ilen, sizeof(info) - ilen);
-        draw_text(screenW/2 - ilen*3 - 12, 90, info, ilen, rgb(50, 45, 80));
-        draw_str(screenW/2 - ilen*3 - 12 + ilen*6, 90, " DL", rgb(50, 45, 80));
     }
+
+    // Bottom separator + sine scroller
+    draw_sep(100, rgb(35, 50, 85));
+    draw_scroller();
 }

@@ -9,12 +9,14 @@ faces = [
   {"Clock", "clock", "c"},
   {"Demo", "demo", "c"},
   {"HD Demo", "hd_demo", "c"},
+  {"Ultra Demo", "ultra_demo", "c"},
   {"Weather", "weather", "c"},
   {"Buttons", "buttons", "c"},
   {"Store", "store", "c"},
   {"Pong", "pong", "assemblyscript"},
   {"Holi", "holi", "c"},
   {"Nyan Cat", "nyan", "c"},
+  {"Glucose", "glucose", "c"},
 ]
 
 for {name, slug, language} <- faces do

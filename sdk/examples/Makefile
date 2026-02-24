@@ -9,7 +9,7 @@ CFLAGS = --target=wasm32 -O2 -nostdlib -fno-builtin \
     -Wl,--max-memory=262144 \
     -I..
 
-FACES = plasma.wasm clock.wasm demo.wasm hd_demo.wasm weather.wasm buttons.wasm store.wasm
+FACES = plasma.wasm clock.wasm demo.wasm hd_demo.wasm ultra_demo.wasm weather.wasm buttons.wasm store.wasm glucose.wasm
 
 all: $(FACES)
 

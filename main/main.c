@@ -16,9 +16,11 @@
 
 static const char *TAG = "main";
 
-// Embedded face binary — only store is built into flash
+// Embedded face binaries
 extern const uint8_t store_wasm_start[]   asm("_binary_store_wasm_start");
 extern const uint8_t store_wasm_end[]     asm("_binary_store_wasm_end");
+extern const uint8_t glucose_wasm_start[] asm("_binary_glucose_wasm_start");
+extern const uint8_t glucose_wasm_end[]   asm("_binary_glucose_wasm_end");
 
 static int s_active_face = 0;
 static uint32_t s_frame_count = 0;
@@ -120,10 +122,13 @@ void app_main(void) {
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(wasm_init());
 
-    // Load only store face — all others are installed on-demand via the store
+    // Load glucose face as default, store face for installing others
+    int glucose_id = wasm_load_face("glucose",
+        glucose_wasm_start, glucose_wasm_end - glucose_wasm_start);
     int store_id = wasm_load_face("store",
         store_wasm_start, store_wasm_end - store_wasm_start);
-    if (store_id >= 0) s_active_face = store_id;
+    if (glucose_id >= 0) s_active_face = glucose_id;
+    else if (store_id >= 0) s_active_face = store_id;
 
     ESP_LOGI(TAG, "Loaded %d WASM face(s), active=%d", wasm_face_count(), s_active_face);
     ESP_LOGI(TAG, "Free internal: %u, largest block: %u",
@@ -132,12 +137,12 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(touch_task, "touch", 4096,  NULL, 5, NULL, 0);
 
-    // Allocate wasm_task stack from PSRAM — internal RAM is too fragmented for 48KB
+    // Allocate wasm_task stack from PSRAM — internal RAM is too fragmented
     static StaticTask_t s_wasm_tcb;
     static StackType_t *s_wasm_stack;
-    s_wasm_stack = heap_caps_malloc(49152, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_wasm_stack = heap_caps_malloc(98304, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_wasm_stack) {
-        xTaskCreateStaticPinnedToCore(wasm_task, "wasm", 49152, NULL, 5,
+        xTaskCreateStaticPinnedToCore(wasm_task, "wasm", 98304, NULL, 5,
                                        s_wasm_stack, &s_wasm_tcb, 1);
     } else {
         ESP_LOGE(TAG, "FAILED to allocate wasm_task stack from PSRAM!");

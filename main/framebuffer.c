@@ -1,12 +1,12 @@
 // Triple-buffered VFB with on-the-fly LCD bounce buffer scaling.
 //
 // Architecture:
-//   - 3 VFB buffers in SRAM (allocated at HD size = 30KB each, 90KB total)
+//   - 3 VFB buffers in SRAM (allocated at Ultra size = 48KB each, 144KB total)
 //   - WASM task writes to s_back, then calls fb_publish()
 //   - on_vsync ISR swaps ready→front via fb_vsync_swap()
 //   - on_bounce_empty ISR calls fb_fill_bounce() to scale VFB→bounce (SRAM→SRAM)
 //   - Zero PSRAM traffic for rendering
-//   - Supports standard (80x48, 10x) and HD (160x96, 5x) per face
+//   - Supports standard (80x48, 10x), HD (160x96, 5x), Ultra (200x120, 4x)
 
 #include "framebuffer.h"
 #include "board.h"
@@ -15,8 +15,8 @@
 #include "freertos/portmacro.h"
 #include <string.h>
 
-// Allocate at HD size (largest possible) — 16-byte aligned for SIMD
-static uint16_t s_vfb[3][VFB_HD_PIXEL_COUNT] __attribute__((aligned(16)));
+// Allocate at Ultra size (largest possible) — 16-byte aligned for SIMD
+static uint16_t s_vfb[3][VFB_ULTRA_PIXEL_COUNT] __attribute__((aligned(16)));
 
 static volatile int s_front_idx = 0;   // ISR reads this for bounce buffer fill
 static volatile int s_ready_idx = -1;  // published by wasm, consumed by vsync ISR
@@ -29,6 +29,7 @@ static SemaphoreHandle_t s_vsync_sem = NULL;
 static volatile int s_active_width  = VFB_WIDTH;
 static volatile int s_active_height = VFB_HEIGHT;
 static volatile int s_active_scale  = VFB_SCALE;
+static volatile int s_active_mode   = RES_STANDARD;
 
 void fb_init(void) {
     memset(s_vfb, 0, sizeof(s_vfb));
@@ -68,15 +69,26 @@ void fb_wait_vsync(void) {
     xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(100));
 }
 
-void fb_set_resolution(bool hd) {
-    if (hd) {
+void fb_set_resolution(int mode) {
+    switch (mode) {
+    case RES_ULTRA:
+        s_active_width  = VFB_ULTRA_WIDTH;
+        s_active_height = VFB_ULTRA_HEIGHT;
+        s_active_scale  = VFB_ULTRA_SCALE;
+        s_active_mode   = RES_ULTRA;
+        break;
+    case RES_HD:
         s_active_width  = VFB_HD_WIDTH;
         s_active_height = VFB_HD_HEIGHT;
         s_active_scale  = VFB_HD_SCALE;
-    } else {
+        s_active_mode   = RES_HD;
+        break;
+    default:
         s_active_width  = VFB_WIDTH;
         s_active_height = VFB_HEIGHT;
         s_active_scale  = VFB_SCALE;
+        s_active_mode   = RES_STANDARD;
+        break;
     }
 }
 
@@ -178,6 +190,47 @@ static void IRAM_ATTR fill_bounce_5x(uint16_t *dst, const uint16_t *vfb,
     }
 }
 
+// Ultra mode (4x): 4 LCD rows per VFB row
+// Each pixel block: 3 bright + 1 dimmed right border
+// Bottom border row (sub_row==3): all dimmed
+static void IRAM_ATTR fill_bounce_4x(uint16_t *dst, const uint16_t *vfb,
+                                      int lcd_row_start, int num_lcd_rows) {
+    for (int lcd_row = lcd_row_start; lcd_row < lcd_row_start + num_lcd_rows; lcd_row++) {
+        int vy = lcd_row / VFB_ULTRA_SCALE;
+        int sub_row = lcd_row % VFB_ULTRA_SCALE;
+
+        if (vy >= VFB_ULTRA_HEIGHT) {
+            memset(dst, 0, LCD_H_RES * sizeof(uint16_t));
+            dst += LCD_H_RES;
+            continue;
+        }
+
+        const uint16_t *vfb_row = &vfb[vy * VFB_ULTRA_WIDTH];
+
+        if (sub_row == VFB_ULTRA_SCALE - 1) {
+            // Bottom border row — all dimmed
+            for (int vx = 0; vx < VFB_ULTRA_WIDTH; vx++) {
+                uint16_t dimmed = dim_pixel(vfb_row[vx], GLOW_DIM_FACTOR);
+                uint32_t dim2 = ((uint32_t)dimmed << 16) | dimmed;
+                uint32_t *d32 = (uint32_t *)&dst[vx * VFB_ULTRA_SCALE];
+                d32[0] = dim2;
+                d32[1] = dim2;
+            }
+        } else {
+            // Interior row: 3 bright + 1 dimmed right border
+            for (int vx = 0; vx < VFB_ULTRA_WIDTH; vx++) {
+                uint16_t px = vfb_row[vx];
+                uint32_t px2 = ((uint32_t)px << 16) | px;
+                uint32_t *d32 = (uint32_t *)&dst[vx * VFB_ULTRA_SCALE];
+                d32[0] = px2;
+                dst[vx * VFB_ULTRA_SCALE + 2] = px;
+                dst[vx * VFB_ULTRA_SCALE + 3] = dim_pixel(px, GLOW_DIM_FACTOR);
+            }
+        }
+        dst += LCD_H_RES;
+    }
+}
+
 void IRAM_ATTR fb_fill_bounce(void *bounce_buf, int pos_px, int len_bytes) {
     uint16_t *dst = (uint16_t *)bounce_buf;
     const uint16_t *vfb = s_vfb[s_front_idx];
@@ -185,7 +238,10 @@ void IRAM_ATTR fb_fill_bounce(void *bounce_buf, int pos_px, int len_bytes) {
     int lcd_row_start = pos_px / LCD_H_RES;
     int num_lcd_rows = len_bytes / (LCD_H_RES * sizeof(uint16_t));
 
-    if (s_active_scale == VFB_HD_SCALE) {
+    int mode = s_active_mode;
+    if (mode == RES_ULTRA) {
+        fill_bounce_4x(dst, vfb, lcd_row_start, num_lcd_rows);
+    } else if (mode == RES_HD) {
         fill_bounce_5x(dst, vfb, lcd_row_start, num_lcd_rows);
     } else {
         fill_bounce_10x(dst, vfb, lcd_row_start, num_lcd_rows);

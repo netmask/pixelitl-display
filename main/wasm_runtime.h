@@ -42,7 +42,7 @@ typedef struct {
     uint32_t total_frames;
     uint32_t skipped_frames;
 
-    bool     hd;           // true = 160x96 (5x), false = 80x48 (10x)
+    int      res_mode;     // RES_STANDARD(80x48), RES_HD(160x96), RES_ULTRA(200x120)
     uint16_t *draw_target;
     uint8_t  *wasm_buf;    // PSRAM buffer for downloaded faces (NULL for embedded)
 } face_t;

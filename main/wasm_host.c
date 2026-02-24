@@ -435,10 +435,10 @@ m3ApiRawFunction(host_get_frame) {
 
 m3ApiRawFunction(host_set_resolution) {
     m3ApiGetArg(int32_t, mode);
-    bool hd = (mode == 1);
-    fb_set_resolution(hd);
+    if (mode < 0 || mode > 2) mode = 0;
+    fb_set_resolution(mode);
     if (g_current_face) {
-        g_current_face->hd = hd;
+        g_current_face->res_mode = mode;
     }
     m3ApiSuccess();
 }

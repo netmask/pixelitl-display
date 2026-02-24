@@ -92,8 +92,8 @@ int wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_siz
     m3_FindFunction(&f->fn_destroy, f->runtime, "app_destroy");
 
     // Call app_init() — face may call set_resolution() here
-    f->hd = false;
-    fb_set_resolution(false);
+    f->res_mode = RES_STANDARD;
+    fb_set_resolution(RES_STANDARD);
     g_current_face = f;
     f->draw_target = fb_get_back();
     result = m3_CallV(f->fn_init);
@@ -119,7 +119,7 @@ int64_t wasm_execute_frame(int face_id, uint32_t frame, uint32_t dt_ms) {
     face_t *f = &s_faces[face_id];
     if (f->state == FACE_STATE_KILLED) return -1;
 
-    fb_set_resolution(f->hd);
+    fb_set_resolution(f->res_mode);
     g_current_face = f;
     f->draw_target = fb_get_back();
     f->over_budget = false;
@@ -226,7 +226,7 @@ void wasm_notify_wifi_ready(void) {
         face_t *f = &s_faces[i];
         if (f->fn_wifi_ready && f->state != FACE_STATE_KILLED) {
             g_current_face = f;
-            fb_set_resolution(f->hd);
+            fb_set_resolution(f->res_mode);
             f->draw_target = fb_get_back();
             M3Result result = m3_CallV(f->fn_wifi_ready);
             if (result) {

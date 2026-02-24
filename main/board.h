@@ -56,3 +56,9 @@
 #define VFB_HD_HEIGHT         96
 #define VFB_HD_SCALE          5
 #define VFB_HD_PIXEL_COUNT    (VFB_HD_WIDTH * VFB_HD_HEIGHT)
+
+// Virtual framebuffer — Ultra resolution (per-face opt-in)
+#define VFB_ULTRA_WIDTH       200
+#define VFB_ULTRA_HEIGHT      120
+#define VFB_ULTRA_SCALE       4
+#define VFB_ULTRA_PIXEL_COUNT (VFB_ULTRA_WIDTH * VFB_ULTRA_HEIGHT)

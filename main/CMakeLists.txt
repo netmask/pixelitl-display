@@ -16,5 +16,6 @@ idf_component_register(
     PRIV_REQUIRES esp_timer esp_lcd esp_driver_i2c driver nvs_flash esp_wifi esp_netif esp_http_client mbedtls
 )
 
-# Embed only store face — all others are installed on-demand
+# Embed faces into flash
 target_add_binary_data(${COMPONENT_TARGET} "faces/store.wasm" BINARY)
+target_add_binary_data(${COMPONENT_TARGET} "faces/glucose.wasm" BINARY)
