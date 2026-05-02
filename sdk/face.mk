@@ -8,7 +8,7 @@
 # or for demos at depth 2:
 #   include ../../sdk/face.mk
 
-CC ?= clang
+CC = clang
 SOURCES ?= $(NAME).c
 SDK_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
 REPO_ROOT := $(SDK_DIR)..
