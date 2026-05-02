@@ -141,13 +141,6 @@ void wasm_face_unload_runtime(int face_id) {
     ESP_LOGI(TAG, "Unloaded runtime for '%s' (id=%d)", f->name, face_id);
 }
 
-int wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size) {
-    int id = wasm_register_face(name, wasm_data, wasm_size);
-    if (id < 0) return -1;
-    if (wasm_face_ensure_loaded(id) != ESP_OK) return -1;
-    return id;
-}
-
 int64_t wasm_execute_frame(int face_id, uint32_t frame, uint32_t dt_ms) {
     if (face_id < 0 || face_id >= s_face_count) return -1;
     face_t *f = &s_faces[face_id];
@@ -382,9 +375,10 @@ int wasm_install_commit(void) {
         return -1;
     }
 
-    int id = wasm_load_face(s_install.name, s_install.wasm_data, s_install.wasm_size);
-    if (id < 0) {
-        ESP_LOGE(TAG, "install: wasm_load_face failed for '%s'", s_install.name);
+    int id = wasm_register_face(s_install.name, s_install.wasm_data, s_install.wasm_size);
+    if (id < 0 || wasm_face_ensure_loaded(id) != ESP_OK) {
+        ESP_LOGE(TAG, "install: register/load failed for '%s'", s_install.name);
+        if (id >= 0) wasm_face_unload_runtime(id);
         heap_caps_free(s_install.wasm_data);
         s_install.wasm_data = NULL;
         s_install.state = INSTALL_ERROR;

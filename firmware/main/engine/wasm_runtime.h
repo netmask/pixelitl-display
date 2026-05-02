@@ -56,8 +56,7 @@ extern face_t *g_current_face;
 esp_err_t wasm_init(void);
 
 // Register a face by name + binary pointer. The m3 runtime is NOT created
-// here — call wasm_face_ensure_loaded(id) before executing frames. Use this
-// instead of wasm_load_face for faces that aren't actively running yet.
+// here — call wasm_face_ensure_loaded(id) before executing frames.
 int       wasm_register_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size);
 
 // Bring a registered face's m3 runtime up if it isn't already.
@@ -68,9 +67,6 @@ esp_err_t wasm_face_ensure_loaded(int face_id);
 // face stays in the catalog (face_count, face_get_name still see it) but
 // its memory is freed. wasm_face_ensure_loaded re-creates the runtime.
 void      wasm_face_unload_runtime(int face_id);
-
-// Old: register + load in one shot. Still used by the dynamic install flow.
-int       wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size);
 
 int64_t   wasm_execute_frame(int face_id, uint32_t frame, uint32_t dt_ms);
 face_t   *wasm_get_face(int face_id);
