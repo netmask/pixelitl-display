@@ -1,0 +1,11 @@
+{
+    "idf.currentSetup": "/Users/netmask/esp/v5.5/esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32-wrover-kit-3.3v.cfg"
+    ],
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32"
+    },
+    "idf.port": "/dev/tty.usbmodem2101",
+    "idf.flashType": "UART"
+}

@@ -51,7 +51,13 @@ defmodule StudioWeb.SimulatorLive do
           <option value="grid" selected>Grid (LED gap)</option>
           <option value="glow">Soft Glow</option>
         </select>
+        <button id="sim-pause" type="button" class="btn btn-xs btn-ghost">Pause</button>
+        <button id="sim-reset" type="button" class="btn btn-xs btn-ghost">Reset</button>
         <span id="fps-counter" class="text-primary font-mono text-sm min-w-[80px] text-right">-- FPS</span>
+      </div>
+
+      <div class="text-[10px] text-base-content/40 font-mono mb-2 tracking-wider">
+        Arrows = swipe · Space = tap · Enter = long press · P = pause · R = reset
       </div>
 
       <div id="canvas-wrap" class="relative mb-3">
@@ -73,7 +79,10 @@ defmodule StudioWeb.SimulatorLive do
 
       <div class="flex gap-3 w-full max-w-[820px]">
         <div class="flex-1 bg-base-200 border border-base-content/10 rounded p-2 max-h-[200px] overflow-y-auto">
-          <h3 class="text-xs text-base-content/40 uppercase tracking-wider mb-1">Console</h3>
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="text-xs text-base-content/40 uppercase tracking-wider">Console</h3>
+            <button id="sim-clear-console" type="button" class="btn btn-ghost btn-xs h-5 min-h-0 text-[10px]">Clear</button>
+          </div>
           <pre id="console-output" class="text-xs whitespace-pre-wrap break-all text-base-content/60"></pre>
         </div>
         <div class="flex-1 bg-base-200 border border-base-content/10 rounded p-2 max-h-[200px] overflow-y-auto">

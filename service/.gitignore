@@ -1,0 +1,9 @@
+_build/
+deps/
+.cache/
+.elixir_ls/
+.fly/
+.env
+.envrc
+*.beam
+erl_crash.dump

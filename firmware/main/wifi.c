@@ -9,6 +9,13 @@
 #include "freertos/timers.h"
 #include <string.h>
 
+// OFFLINE_ONLY: skip the AP connect handshake. WiFi radio is still started
+// (so ESP-NOW works), and pinned to channel 1 to match the peer. Use this
+// when the AP is rejecting auth and you just want the radar face to work.
+// Set to 0 to restore normal behavior (HN, glucose, dota proxy, etc.).
+#define OFFLINE_ONLY 0
+#define OFFLINE_CHANNEL 1
+
 static const char *TAG = "wifi";
 
 static volatile bool s_connected = false;
@@ -34,17 +41,29 @@ static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data) {
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_STA_START) {
+#if OFFLINE_ONLY
+            // Don't try to associate. Pin the radio so ESP-NOW is reliable.
+            esp_wifi_set_channel(OFFLINE_CHANNEL, WIFI_SECOND_CHAN_NONE);
+            ESP_LOGI(TAG, "OFFLINE_ONLY: skipping AP connect, pinned ch=%d",
+                     OFFLINE_CHANNEL);
+#else
             esp_wifi_connect();
+#endif
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             s_connected = false;
             ESP_LOGW(TAG, "Disconnected");
+#if !OFFLINE_ONLY
             schedule_reconnect();
+#endif
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Connected, IP: " IPSTR, IP2STR(&evt->ip_info.ip));
         s_connected = true;
         s_backoff_ms = 1000;
+        // Re-apply PS_NONE on every association — without this, the IDF can
+        // re-enable DTIM-based sleep on reconnect, which kills ESP-NOW recv.
+        esp_wifi_set_ps(WIFI_PS_NONE);
     }
 }
 
@@ -96,6 +115,12 @@ esp_err_t wifi_init(void) {
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set STA mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), TAG, "set config");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
+
+    // Disable WiFi power-save: STA otherwise sleeps for ~300 ms DTIM windows
+    // (listen_interval = 3 × beacon_interval ≈ 307 ms), and any ESP-NOW packet
+    // arriving during a sleep window is missed. With lazy face loading there's
+    // no longer a RAM-fragmentation issue around this call, so PS_NONE is safe.
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     ESP_LOGI(TAG, "WiFi STA started, connecting to '%s'", ssid);
     return ESP_OK;

@@ -17,10 +17,10 @@ const SimulatorHook = {
     // Console output
     const consoleEl = document.getElementById('console-output');
     this.sim.onConsole = (msg) => {
-      if (consoleEl) {
-        consoleEl.textContent += msg + '\n';
-        consoleEl.scrollTop = consoleEl.scrollHeight;
-      }
+      if (!consoleEl) return;
+      if (msg === '__CLEAR__') { consoleEl.textContent = ''; return; }
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
     };
 
     // FPS display
@@ -28,6 +28,17 @@ const SimulatorHook = {
     this.sim.onFps = (fps) => {
       if (fpsEl) fpsEl.textContent = fps + ' FPS';
     };
+
+    // Pause/reset/clear controls
+    const pauseBtn = document.getElementById('sim-pause');
+    const resetBtn = document.getElementById('sim-reset');
+    const clearBtn = document.getElementById('sim-clear-console');
+    if (pauseBtn) pauseBtn.addEventListener('click', () => {
+      this.sim.togglePause();
+      pauseBtn.textContent = this.sim.paused ? 'Resume' : 'Pause';
+    });
+    if (resetBtn) resetBtn.addEventListener('click', () => this.sim.reset());
+    if (clearBtn) clearBtn.addEventListener('click', () => this.sim.clearConsole());
 
     // Stats display
     const statsEl = document.getElementById('stats-content');

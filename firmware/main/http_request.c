@@ -74,8 +74,9 @@ static void process_slot(int i) {
         .timeout_ms = HTTP_TIMEOUT_MS,
         .event_handler = http_event_handler,
         .user_data = &ctx,
-        .buffer_size = 2048,
-        .buffer_size_tx = 1024,
+        // 4096 so TLS records and long cert chains (e.g. Google Frontend) fit.
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 

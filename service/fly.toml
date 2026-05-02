@@ -1,0 +1,39 @@
+# Rename `app` to your unique Fly app, then `fly launch --no-deploy` once.
+
+app = "pixelitl-service"
+primary_region = "iad"   # change to your closest: lax, ord, fra, gru, etc.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4001"
+  PIXELITL_CACHE_DIR = "/data/cache"
+
+[http_service]
+  internal_port = 4001
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0   # bump to 1 if you want zero cold-start latency
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 25
+    hard_limit = 50
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[mounts]]
+  source = "pixelitl_data"
+  destination = "/data"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

@@ -7,6 +7,8 @@
 #include "wifi.h"
 #include "http_request.h"
 #include "kv_store.h"
+#include "esp_now_recv.h"
+#include "esp_wifi.h"
 #include "wasm3.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -472,6 +474,14 @@ m3ApiRawFunction(host_wifi_status) {
     m3ApiReturn(wifi_is_connected() ? 1 : 0);
 }
 
+m3ApiRawFunction(host_wifi_channel) {
+    m3ApiReturnType(int32_t);
+    uint8_t pri = 0;
+    wifi_second_chan_t sec;
+    if (esp_wifi_get_channel(&pri, &sec) != ESP_OK) m3ApiReturn(0);
+    m3ApiReturn((int32_t)pri);
+}
+
 // ===================== HTTP =====================
 
 m3ApiRawFunction(host_http_get) {
@@ -644,6 +654,59 @@ m3ApiRawFunction(host_face_switch) {
     m3ApiSuccess();
 }
 
+// ===================== ESP-NOW receive =====================
+
+m3ApiRawFunction(host_espnow_recv) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, dst_ptr);
+    m3ApiGetArg(int32_t, max_len);
+    m3ApiGetArgMem(uint8_t *, mem);
+    if (max_len <= 0) m3ApiReturn(-1);
+    uint8_t *dst = mem + dst_ptr;
+    int n = pxl_espnow_get_latest(dst, max_len);
+    // Diagnostic — verify the bytes actually landed in WASM memory.
+    static int logn = 0;
+    logn++;
+    if (logn <= 5 || (logn % 30) == 0) {
+        ESP_LOGI("host_recv",
+                 "dst=%p (off=%d) max=%d n=%d first8=%02x %02x %02x %02x %02x %02x %02x %02x",
+                 dst, (int)dst_ptr, (int)max_len, n,
+                 dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], dst[6], dst[7]);
+    }
+    m3ApiReturn(n);
+}
+
+m3ApiRawFunction(host_espnow_has_new) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn(pxl_espnow_has_new());
+}
+
+m3ApiRawFunction(host_espnow_last_rx_ms) {
+    m3ApiReturnType(int64_t);
+    m3ApiReturn(pxl_espnow_last_rx_ms());
+}
+
+m3ApiRawFunction(host_espnow_total_rx) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn((int32_t)pxl_espnow_total_rx());
+}
+
+m3ApiRawFunction(host_espnow_pkt_byte) {
+    m3ApiReturnType(int32_t);
+    m3ApiGetArg(int32_t, idx);
+    m3ApiReturn(pxl_espnow_pkt_byte(idx));
+}
+
+m3ApiRawFunction(host_espnow_pkt_len) {
+    m3ApiReturnType(int32_t);
+    m3ApiReturn(pxl_espnow_pkt_len());
+}
+
+m3ApiRawFunction(host_espnow_consume) {
+    pxl_espnow_consume();
+    m3ApiSuccess();
+}
+
 m3ApiRawFunction(host_face_get_name) {
     m3ApiReturnType(int32_t);
     m3ApiGetArg(int32_t, index);
@@ -722,6 +785,7 @@ void wasm_host_link_all(IM3Module module) {
 
     // WiFi
     m3_LinkRawFunction(module, MOD, "wifi_status",   "i()",      host_wifi_status);
+    m3_LinkRawFunction(module, MOD, "wifi_channel",  "i()",      host_wifi_channel);
 
     // HTTP (async)
     m3_LinkRawFunction(module, MOD, "http_get",           "i(ii)",      host_http_get);
@@ -731,6 +795,15 @@ void wasm_host_link_all(IM3Module module) {
     m3_LinkRawFunction(module, MOD, "http_response_len",  "i(i)",       host_http_response_len);
     m3_LinkRawFunction(module, MOD, "http_read",          "i(iii)",     host_http_read);
     m3_LinkRawFunction(module, MOD, "http_close",         "v(i)",       host_http_close);
+
+    // ESP-NOW receive
+    m3_LinkRawFunction(module, MOD, "espnow_recv",         "i(ii)", host_espnow_recv);
+    m3_LinkRawFunction(module, MOD, "espnow_has_new",      "i()",   host_espnow_has_new);
+    m3_LinkRawFunction(module, MOD, "espnow_last_rx_ms",   "I()",   host_espnow_last_rx_ms);
+    m3_LinkRawFunction(module, MOD, "espnow_total_rx",     "i()",   host_espnow_total_rx);
+    m3_LinkRawFunction(module, MOD, "espnow_pkt_byte",     "i(i)",  host_espnow_pkt_byte);
+    m3_LinkRawFunction(module, MOD, "espnow_pkt_len",      "i()",   host_espnow_pkt_len);
+    m3_LinkRawFunction(module, MOD, "espnow_consume",      "v()",   host_espnow_consume);
 
     // KV Store
     m3_LinkRawFunction(module, MOD, "kv_set",        "i(iiii)",  host_kv_set);

@@ -33,6 +33,8 @@ static int  status_len;
 static int  install_idx = -1;
 static int  last_ist;
 static float install_anim;
+static int  post_install_timer;   // ms countdown after INSTALL_OK before face_switch
+static int  post_error_timer;     // ms countdown after INSTALL_ERROR before reset
 
 // ---- Starfield (3-layer parallax) ----
 #define NSTARS 50
@@ -131,6 +133,51 @@ static void refresh_installed(void) {
     }
 }
 
+// Populate the catalog from locally-installed faces. Used when offline so
+// the user always has a working face switcher even without network.
+static void load_local_catalog(void) {
+    int n = face_count();
+    cat_count = 0;
+    char buf[MAX_NAME];
+    for (int i = 0; i < n && cat_count < MAX_CATALOG; i++) {
+        int nl = face_get_name(i, buf, sizeof(buf));
+        if (nl <= 0) continue;
+        entry_t *e = &catalog[cat_count];
+        pxl_memcpy(e->name, buf, nl);
+        e->name[nl] = '\0';
+        e->name_len = nl;
+        e->filename[0] = '\0';
+        e->filename_len = 0;
+        e->installed = 1;
+        cat_count++;
+    }
+    scroll_pos = 0;
+}
+
+// After a remote index arrives, append any locally-installed faces that the
+// remote catalog didn't list, so the user can still switch to them.
+static void merge_local_extras(void) {
+    int n = face_count();
+    char buf[MAX_NAME];
+    for (int f = 0; f < n && cat_count < MAX_CATALOG; f++) {
+        int nl = face_get_name(f, buf, sizeof(buf));
+        if (nl <= 0) continue;
+        int found = 0;
+        for (int c = 0; c < cat_count; c++) {
+            if (pxl_streq(catalog[c].name, buf)) { found = 1; break; }
+        }
+        if (found) continue;
+        entry_t *e = &catalog[cat_count];
+        pxl_memcpy(e->name, buf, nl);
+        e->name[nl] = '\0';
+        e->name_len = nl;
+        e->filename[0] = '\0';
+        e->filename_len = 0;
+        e->installed = 1;
+        cat_count++;
+    }
+}
+
 static void setup_item_buttons(void) {
     int vis = cat_count - scroll_pos;
     if (vis > VISIBLE) vis = VISIBLE;
@@ -192,6 +239,10 @@ void app_init(void) {
     btn_refresh.pressed_bg = rgb(25, 45, 30);
 
     init_stars();
+    // Populate the list from locally-installed faces immediately so the store
+    // doubles as an offline switcher if WiFi/server are unavailable.
+    load_local_catalog();
+    setup_item_buttons();
     state = S_WIFI;
     set_status("AWAITING SIGNAL...");
 }
@@ -235,18 +286,26 @@ void app_update(int frame, int dt) {
                 if (cat_count > 0) {
                     state = S_READY;
                     refresh_installed();
+                    merge_local_extras();
                     setup_item_buttons();
                     set_status("");
                 } else {
+                    // Empty remote catalog — fall back to local so UI stays useful
+                    load_local_catalog();
+                    setup_item_buttons();
                     state = S_ERROR;
                     set_status("EMPTY CATALOG");
                 }
             } else {
                 http_close(http_h); http_h = -1;
+                load_local_catalog();
+                setup_item_buttons();
                 state = S_ERROR; set_status("SERVER ERROR");
             }
         } else if (st == HTTP_ERROR) {
             http_close(http_h); http_h = -1;
+            load_local_catalog();
+            setup_item_buttons();
             state = S_ERROR; set_status("CONNECT FAILED");
         }
         return;
@@ -265,37 +324,41 @@ void app_update(int frame, int dt) {
         int ist = face_install_status();
         if (ist != last_ist) {
             last_ist = ist;
-            if (ist == INSTALL_DOWNLOADING) set_status("DOWNLOADING...");
-            else if (ist == INSTALL_LOADING) set_status("LOADING...");
-            else if (ist == INSTALL_OK) set_status("INSTALLED!");
-            else if (ist == INSTALL_ERROR) set_status("FAILED!");
+            if (ist == INSTALL_DOWNLOADING)   { set_status("DOWNLOADING..."); }
+            else if (ist == INSTALL_LOADING)  { set_status("LOADING..."); }
+            else if (ist == INSTALL_OK)       { set_status("INSTALLED!"); post_install_timer = 800; }
+            else if (ist == INSTALL_ERROR)    { set_status("FAILED!");    post_error_timer   = 1500; }
         }
-        if (ist == INSTALL_OK && (frame % 60 == 0)) {
-            int nf = face_count() - 1;
-            face_install_reset();
-            install_idx = -1;
-            last_ist = INSTALL_IDLE;
-            face_switch(nf);
-            return;
+        if (ist == INSTALL_OK && post_install_timer > 0) {
+            post_install_timer -= dt;
+            if (post_install_timer <= 0) {
+                int nf = face_count() - 1;
+                face_install_reset();
+                install_idx = -1;
+                last_ist = INSTALL_IDLE;
+                face_switch(nf);
+                return;
+            }
         }
-        if (ist == INSTALL_ERROR && (frame % 90 == 0)) {
-            face_install_reset();
-            install_idx = -1;
-            last_ist = INSTALL_IDLE;
-            state = S_READY;
-            refresh_installed();
-            setup_item_buttons();
-            set_status("");
+        if (ist == INSTALL_ERROR && post_error_timer > 0) {
+            post_error_timer -= dt;
+            if (post_error_timer <= 0) {
+                face_install_reset();
+                install_idx = -1;
+                last_ist = INSTALL_IDLE;
+                state = S_READY;
+                refresh_installed();
+                setup_item_buttons();
+                set_status("");
+            }
         }
         return;
     }
 
-    // Error: tap to retry
-    if (state == S_ERROR) {
-        if (get_gesture() == GESTURE_TAP) fetch_index();
-        return;
-    }
-    if (state != S_READY) return;
+    // Allow browsing/switching in offline states too. Only S_LOADING and
+    // S_INSTALLING lock the UI (handled above). The refresh button doubles
+    // as the "retry connection" affordance in S_ERROR/S_WIFI.
+    if (state != S_READY && state != S_ERROR && state != S_WIFI) return;
 
     // Swipe scroll
     int gesture = get_gesture();
@@ -329,7 +392,20 @@ void app_update(int frame, int dt) {
     for (int i = 0; i < vis; i++) {
         if (pxl_button_clicked(&item_btns[i])) {
             int idx = scroll_pos + i;
-            if (idx < cat_count && !catalog[idx].installed) {
+            if (idx >= cat_count) break;
+            if (catalog[idx].installed) {
+                // Tap-to-switch: find the installed face by name and switch to it.
+                int n = face_count();
+                char buf[MAX_NAME];
+                for (int f = 0; f < n; f++) {
+                    if (face_get_name(f, buf, sizeof(buf)) > 0 &&
+                        pxl_streq(catalog[idx].name, buf)) {
+                        face_switch(f);
+                        return;
+                    }
+                }
+            } else if (state == S_READY && catalog[idx].filename_len > 0) {
+                // Install only when we have a live catalog with a real download URL
                 build_url(catalog[idx].filename, catalog[idx].filename_len);
                 int ret = face_install(full_url, pxl_strlen(full_url),
                                        catalog[idx].name, catalog[idx].name_len);
@@ -338,8 +414,13 @@ void app_update(int frame, int dt) {
                     last_ist = INSTALL_DOWNLOADING;
                     state = S_INSTALLING;
                     install_anim = 0.0f;
+                    post_install_timer = 0;
+                    post_error_timer = 0;
                     set_status("STARTING...");
                 }
+            } else {
+                // Offline and this entry isn't installable — surface a hint
+                set_status("OFFLINE");
             }
             break;
         }
@@ -418,11 +499,11 @@ static void draw_list(void) {
         int iy = LIST_Y + i * ITEM_H;
         int inst = e->installed;
 
-        int hover = !inst && is_pressed() && _pxl_btn_inside(&item_btns[i]);
+        int hover = is_pressed() && _pxl_btn_inside(&item_btns[i]);
 
         // Background
         unsigned int bg;
-        if (hover) bg = rgb(30, 25, 55);
+        if (hover) bg = inst ? rgb(20, 40, 28) : rgb(30, 25, 55);
         else if (i == raster_slot) bg = rgb(14, 12, 34);
         else bg = (i & 1) ? rgb(10, 8, 24) : rgb(12, 10, 28);
         fill_rect(LIST_X, iy, LIST_W, ITEM_H - 1, bg);
@@ -434,15 +515,17 @@ static void draw_list(void) {
 
         // Name
         unsigned int fg;
-        if (inst) fg = rgb(50, 130, 70);
-        else if (hover) fg = rgb(255, 255, 255);
-        else fg = rgb(170, 175, 200);
+        if (hover)     fg = rgb(255, 255, 255);
+        else if (inst) fg = rgb(50, 130, 70);
+        else           fg = rgb(170, 175, 200);
         draw_text(LIST_X + 5, iy + 1, e->name, e->name_len, fg);
 
-        // Status tag
+        // Status tag — installed: [OK] normally, [GO] on hover (tap switches)
         int tag_x = LIST_X + LIST_W - 24;
         if (inst) {
-            draw_str(tag_x, iy + 1, "[OK]", rgb(40, 150, 60));
+            const char *tag = hover ? "[GO]" : "[OK]";
+            unsigned int tc = hover ? rgb(120, 255, 140) : rgb(40, 150, 60);
+            draw_str(tag_x, iy + 1, tag, tc);
         } else {
             unsigned int ac = hover ? rgb(255, 220, 100) : dim_color(accent, 0.5f);
             draw_str(tag_x, iy + 1, "[>>]", ac);
@@ -532,6 +615,25 @@ void app_draw(void) {
     draw_copper();
     draw_logo();
     draw_sep(24, rgb(35, 50, 85));
+
+    // Offline states: if we have a local catalog, show the list as a switcher
+    // instead of a blocking modal. Only show the modal when cat_count == 0.
+    if ((state == S_WIFI || state == S_ERROR) && cat_count > 0) {
+        draw_list();
+        draw_info();
+        pxl_button_draw(&btn_up);
+        pxl_button_draw(&btn_down);
+        pxl_button_draw(&btn_refresh);
+        // Compact offline banner in info panel footer
+        unsigned int oc = (state == S_ERROR)
+            ? dim_color(rgb(255, 120, 80), 0.6f + sinf(t * 2.5f) * 0.2f)
+            : dim_color(rgb(0, 200, 255), 0.6f + sinf(t * 2.5f) * 0.2f);
+        const char *lbl = (state == S_ERROR) ? "OFFLINE" : "NO WIFI";
+        draw_str_centered(INFO_X, INFO_W, 95, lbl, oc);
+        draw_sep(100, rgb(35, 50, 85));
+        draw_scroller();
+        return;
+    }
 
     if (state == S_WIFI) {
         fill_rect(35, 42, 130, 28, rgb(8, 6, 20));

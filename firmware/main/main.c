@@ -7,6 +7,7 @@
 #include "wifi.h"
 #include "http_request.h"
 #include "kv_store.h"
+#include "esp_now_recv.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -17,10 +18,14 @@
 static const char *TAG = "main";
 
 // Embedded face binaries
-extern const uint8_t store_wasm_start[]   asm("_binary_store_wasm_start");
-extern const uint8_t store_wasm_end[]     asm("_binary_store_wasm_end");
-extern const uint8_t glucose_wasm_start[] asm("_binary_glucose_wasm_start");
-extern const uint8_t glucose_wasm_end[]   asm("_binary_glucose_wasm_end");
+extern const uint8_t store_wasm_start[]     asm("_binary_store_wasm_start");
+extern const uint8_t store_wasm_end[]       asm("_binary_store_wasm_end");
+extern const uint8_t glucose_wasm_start[]   asm("_binary_glucose_wasm_start");
+extern const uint8_t glucose_wasm_end[]     asm("_binary_glucose_wasm_end");
+extern const uint8_t dashboard_wasm_start[] asm("_binary_dashboard_wasm_start");
+extern const uint8_t dashboard_wasm_end[]   asm("_binary_dashboard_wasm_end");
+extern const uint8_t radar_wasm_start[]     asm("_binary_radar_wasm_start");
+extern const uint8_t radar_wasm_end[]       asm("_binary_radar_wasm_end");
 
 static int s_active_face = 0;
 static uint32_t s_frame_count = 0;
@@ -38,6 +43,7 @@ static void wasm_task(void *arg) {
     ESP_LOGI(TAG, "WASM task on core %d", xPortGetCoreID());
     int64_t last_frame_us = esp_timer_get_time();
     bool wifi_notified = false;
+    int  last_active_face = -1;   // tracks face switches for lazy load/unload
 
     while (true) {
         fb_wait_vsync();
@@ -55,6 +61,17 @@ static void wasm_task(void *arg) {
             if (new_id >= 0) {
                 ESP_LOGI(TAG, "Installed new face id=%d, total=%d", new_id, wasm_face_count());
             }
+        }
+
+        // Face switch detection: when active changes, free the previous face's
+        // m3 runtime so only one face is "live" at a time. The new face is
+        // lazy-loaded inside wasm_execute_frame on first call. This is what
+        // gives faces real isolation — only the visible one consumes RAM.
+        if (s_active_face != last_active_face) {
+            if (last_active_face >= 0) {
+                wasm_face_unload_runtime(last_active_face);
+            }
+            last_active_face = s_active_face;
         }
 
         int64_t now = esp_timer_get_time();
@@ -122,12 +139,21 @@ void app_main(void) {
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(wasm_init());
 
-    // Load glucose face as default, store face for installing others
-    int glucose_id = wasm_load_face("glucose",
+    // Register all embedded faces — m3 runtimes are NOT created here. Each
+    // face is brought up only when the user switches to it (and the previous
+    // face's runtime is freed). This keeps internal RAM uncontended for WiFi
+    // and other shared infrastructure.
+    int dashboard_id = wasm_register_face("dashboard",
+        dashboard_wasm_start, dashboard_wasm_end - dashboard_wasm_start);
+    int glucose_id = wasm_register_face("glucose",
         glucose_wasm_start, glucose_wasm_end - glucose_wasm_start);
-    int store_id = wasm_load_face("store",
+    int store_id = wasm_register_face("store",
         store_wasm_start, store_wasm_end - store_wasm_start);
-    if (glucose_id >= 0) s_active_face = glucose_id;
+    int radar_id = wasm_register_face("radar",
+        radar_wasm_start, radar_wasm_end - radar_wasm_start);
+    (void)radar_id;
+    if (dashboard_id >= 0) s_active_face = dashboard_id;
+    else if (glucose_id >= 0) s_active_face = glucose_id;
     else if (store_id >= 0) s_active_face = store_id;
 
     ESP_LOGI(TAG, "Loaded %d WASM face(s), active=%d", wasm_face_count(), s_active_face);
@@ -152,7 +178,12 @@ void app_main(void) {
     ESP_ERROR_CHECK(wifi_init());
     ESP_ERROR_CHECK(http_request_init());
 
-    // Main task: periodic stats logging
+    // ESP-NOW receiver — runs alongside the regular WiFi station. Faces poll
+    // it via host functions; the radio runs continuously but costs ~nothing
+    // when no face reads from it.
+    ESP_ERROR_CHECK(pxl_espnow_init());
+
+    // Main task: periodic stats logging.
     uint32_t last_frames = 0;
     int64_t last_stats_us = esp_timer_get_time();
 

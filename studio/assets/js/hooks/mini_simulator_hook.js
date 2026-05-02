@@ -4,15 +4,15 @@ const MiniSimulatorHook = {
   mounted() {
     const canvas = this.el;
     this.sim = new PixelitlSimulator(canvas);
-    this.sim.glowMode = 'grid';
 
-    // Wire up glow mode selector
     const glowSelect = document.getElementById('editor-glow-mode');
     if (glowSelect) {
-      this.sim.glowMode = glowSelect.value;
+      this.sim.glowMode = glowSelect.value || 'grid';
       glowSelect.addEventListener('change', () => {
         this.sim.glowMode = glowSelect.value;
       });
+    } else {
+      this.sim.glowMode = 'grid';
     }
 
     // FPS display
@@ -24,10 +24,10 @@ const MiniSimulatorHook = {
     // Console output
     const consoleEl = document.getElementById('editor-console');
     this.sim.onConsole = (msg) => {
-      if (consoleEl) {
-        consoleEl.textContent += msg + '\n';
-        consoleEl.scrollTop = consoleEl.scrollHeight;
-      }
+      if (!consoleEl) return;
+      if (msg === '__CLEAR__') { consoleEl.textContent = ''; return; }
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
     };
 
     // Stats display

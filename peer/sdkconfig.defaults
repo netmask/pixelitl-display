@@ -1,0 +1,14 @@
+# pixelitl peer — defaults applied on first build.
+# Wipe `sdkconfig` to re-apply.
+
+CONFIG_IDF_TARGET="esp32"
+
+# 1ms tick — friendly for ESP-NOW timing later.
+CONFIG_FREERTOS_HZ=1000
+
+# Smaller log noise on boot.
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL=3
+
+# Optimize for size; ESP-NOW + a small app fits comfortably.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

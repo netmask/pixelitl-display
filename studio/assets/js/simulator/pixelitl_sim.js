@@ -3,7 +3,14 @@
 
 const VFB_STD_W = 80, VFB_STD_H = 48, STD_SCALE = 10;
 const VFB_HD_W = 160, VFB_HD_H = 96, HD_SCALE = 5;
+const VFB_ULTRA_W = 200, VFB_ULTRA_H = 120, ULTRA_SCALE = 4;
 const LCD_W = 800, LCD_H = 480;
+
+const RES_MODES = {
+  0: { w: VFB_STD_W,   h: VFB_STD_H,   scale: STD_SCALE,   label: '80x48' },
+  1: { w: VFB_HD_W,    h: VFB_HD_H,    scale: HD_SCALE,    label: '160x96 (HD)' },
+  2: { w: VFB_ULTRA_W, h: VFB_ULTRA_H, scale: ULTRA_SCALE, label: '200x120 (Ultra)' },
+};
 
 // 5x7 Font (column-major)
 const FONT_5X7 = [
@@ -47,11 +54,15 @@ export class PixelitlSimulator {
     this.ctx = canvas.getContext('2d');
     this.imageData = this.ctx.createImageData(LCD_W, LCD_H);
     this.pixels = new Uint32Array(this.imageData.data.buffer);
-    this.vfb = new Uint16Array(VFB_HD_W * VFB_HD_H);
+    // Sized for Ultra so every resolution fits in the same backing store.
+    this.vfb = new Uint16Array(VFB_ULTRA_W * VFB_ULTRA_H);
 
     this.curW = VFB_STD_W;
     this.curH = VFB_STD_H;
     this.curScale = STD_SCALE;
+    this.resMode = 0;
+
+    this.paused = false;
 
     this.faces = {};
     this.activeFace = null;
@@ -94,35 +105,61 @@ export class PixelitlSimulator {
 
   _setupInput() {
     const c = this.canvas;
-    c.addEventListener('mousedown', e => {
+    c.style.touchAction = 'none';
+
+    const toVfb = (clientX, clientY) => {
       const r = c.getBoundingClientRect();
-      this.touchX = Math.floor(((e.clientX - r.left) / r.width) * this.curW);
-      this.touchY = Math.floor(((e.clientY - r.top) / r.height) * this.curH);
+      return {
+        x: Math.floor(((clientX - r.left) / r.width)  * this.curW),
+        y: Math.floor(((clientY - r.top)  / r.height) * this.curH),
+      };
+    };
+
+    c.addEventListener('pointerdown', e => {
+      c.setPointerCapture(e.pointerId);
+      const { x, y } = toVfb(e.clientX, e.clientY);
+      this.touchX = x; this.touchY = y;
       this.isPressed = true;
       this.gestureStartX = e.clientX;
       this.gestureStartY = e.clientY;
       this.gestureStartTime = performance.now();
+      e.preventDefault();
     });
-    c.addEventListener('mousemove', e => {
+    c.addEventListener('pointermove', e => {
       if (!this.isPressed) return;
-      const r = c.getBoundingClientRect();
-      this.touchX = Math.floor(((e.clientX - r.left) / r.width) * this.curW);
-      this.touchY = Math.floor(((e.clientY - r.top) / r.height) * this.curH);
+      const { x, y } = toVfb(e.clientX, e.clientY);
+      this.touchX = x; this.touchY = y;
     });
-    c.addEventListener('mouseup', e => {
+    const endPointer = e => {
       if (!this.isPressed) return;
       const dx = e.clientX - this.gestureStartX;
       const dy = e.clientY - this.gestureStartY;
       const dur = performance.now() - this.gestureStartTime;
       if (Math.abs(dx) > 30 || Math.abs(dy) > 30) {
         this.gestureState = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 3 : 2) : (dy > 0 ? 5 : 4);
-      } else if (dur < 300) this.gestureState = 1;
-      else if (dur > 500) this.gestureState = 6;
+      } else if (dur > 500) this.gestureState = 6;
+      else if (dur < 300) this.gestureState = 1;
       this.touchX = -1; this.touchY = -1; this.isPressed = false;
-    });
-    c.addEventListener('mouseleave', () => {
-      if (this.isPressed) { this.touchX = -1; this.touchY = -1; this.isPressed = false; }
-    });
+    };
+    c.addEventListener('pointerup', endPointer);
+    c.addEventListener('pointercancel', endPointer);
+
+    this._onKey = e => {
+      // Ignore when a form field is focused
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      switch (e.key) {
+        case 'ArrowLeft':  this.gestureState = 2; e.preventDefault(); break;
+        case 'ArrowRight': this.gestureState = 3; e.preventDefault(); break;
+        case 'ArrowUp':    this.gestureState = 4; e.preventDefault(); break;
+        case 'ArrowDown':  this.gestureState = 5; e.preventDefault(); break;
+        case ' ':          this.gestureState = 1; e.preventDefault(); break; // tap
+        case 'Enter':      this.gestureState = 6; e.preventDefault(); break; // long press
+        case 'p': case 'P': this.togglePause(); break;
+        case 'r': case 'R': if (!e.ctrlKey && !e.metaKey) this.reset(); break;
+      }
+    };
+    window.addEventListener('keydown', this._onKey);
   }
 
   _consumeGesture() { const g = this.gestureState; this.gestureState = 0; return g; }
@@ -307,14 +344,12 @@ export class PixelitlSimulator {
   async loadFace(name, wasmBytes) {
     const sim = this;
     const importedMemory = new WebAssembly.Memory({ initial: 2, maximum: 4 });
-    let faceHD = false;
+    let faceResMode = 0;
 
     // Mutable ref — updated after instantiation to instance.exports.memory
     // so host functions read from the WASM module's actual memory, not the
     // (potentially unused) imported one.
     const mem = { m: importedMemory };
-
-    const faceCount = Object.keys(this.faces).length;
 
     const imports = {
       env: {
@@ -360,9 +395,10 @@ export class PixelitlSimulator {
         width: () => sim.curW,
         height: () => sim.curH,
         set_resolution: (mode) => {
-          faceHD = (mode === 1);
-          if (faceHD) { sim.curW = VFB_HD_W; sim.curH = VFB_HD_H; sim.curScale = HD_SCALE; }
-          else { sim.curW = VFB_STD_W; sim.curH = VFB_STD_H; sim.curScale = STD_SCALE; }
+          const m = RES_MODES[mode] || RES_MODES[0];
+          faceResMode = RES_MODES[mode] ? mode : 0;
+          sim.curW = m.w; sim.curH = m.h; sim.curScale = m.scale;
+          sim.resMode = faceResMode;
         },
         log_print: (ptr, len) => {
           const bytes = new Uint8Array(mem.m.buffer, ptr, len);
@@ -458,17 +494,31 @@ export class PixelitlSimulator {
             return 0;
           } catch(e) { return -1; }
         },
-        // Face install stubs
-        face_install: () => 0,
-        face_install_status: () => 3,
+        // Face management — faces loaded into the simulator are considered
+        // "installed". This makes the store face's list, switch, and count
+        // behavior match the device.
+        face_install: () => -1,            // no live installs in the sim
+        face_install_status: () => -1,     // INSTALL_ERROR
         face_install_reset: () => {},
-        face_count: () => faceCount,
+        face_count: () => Object.keys(sim.faces).length,
+        face_get_name: (index, dstPtr, maxLen) => {
+          const names = Object.keys(sim.faces);
+          if (index < 0 || index >= names.length) return -1;
+          const bytes = new TextEncoder().encode(names[index]);
+          const len = Math.min(bytes.length, maxLen);
+          new Uint8Array(mem.m.buffer, dstPtr, len).set(bytes.subarray(0, len));
+          return len;
+        },
+        face_switch: (index) => {
+          const names = Object.keys(sim.faces);
+          if (index >= 0 && index < names.length) sim.setActiveFace(names[index]);
+        },
       }
     };
 
     try {
       sim.curW = VFB_STD_W; sim.curH = VFB_STD_H; sim.curScale = STD_SCALE;
-      faceHD = false;
+      faceResMode = 0;
 
       const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
 
@@ -482,11 +532,15 @@ export class PixelitlSimulator {
         instance,
         update: instance.exports.app_update,
         draw: instance.exports.app_draw,
+        wifiReady: instance.exports.app_wifi_ready,
         memory: actualMemory,
-        hd: faceHD,
+        resMode: faceResMode,
       };
       if (!sim.activeFace) sim.activeFace = name;
-      sim.log(`Loaded face: ${name}` + (faceHD ? ' (HD 160x96)' : ' (80x48)'));
+      sim.log(`Loaded face: ${name} (${RES_MODES[faceResMode].label})`);
+      // Simulate a WiFi-ready event so faces that wait on it can start work.
+      try { sim.faces[name].wifiReady && sim.faces[name].wifiReady(); }
+      catch (e) { /* swallow — optional export */ }
       return true;
     } catch (e) {
       sim.log(`Error loading ${name}: ${e.message}`);
@@ -572,26 +626,49 @@ export class PixelitlSimulator {
 
   start() {
     this.running = true;
+    this.lastTime = 0;
     this._rafId = requestAnimationFrame(ts => this._loop(ts));
   }
 
   stop() {
     this.running = false;
     if (this._rafId) cancelAnimationFrame(this._rafId);
+    if (this._onKey) window.removeEventListener('keydown', this._onKey);
+  }
+
+  pause()      { this.paused = true; }
+  resume()     { this.paused = false; this.lastTime = 0; }
+  togglePause(){ this.paused ? this.resume() : this.pause(); }
+
+  // Rewind frame counter and clear the VFB without reloading the face.
+  reset() {
+    this.frameCount = 0;
+    this.vfb.fill(0);
+    this.gestureState = 0;
+    this.touchX = -1; this.touchY = -1; this.isPressed = false;
+    const face = this.activeFace && this.faces[this.activeFace];
+    if (face && face.instance.exports.app_init) {
+      try { face.instance.exports.app_init(); } catch(e) { this.log(`reset: ${e.message}`); }
+      face.resMode = this.resMode;
+      if (face.wifiReady) { try { face.wifiReady(); } catch(e) {} }
+    }
+  }
+
+  clearConsole() {
+    this.consoleLines.length = 0;
+    if (this.onConsole) this.onConsole('__CLEAR__');
   }
 
   _loop(timestamp) {
     if (!this.running) return;
-    const dt = timestamp - this.lastTime;
+    const dt = this.lastTime === 0 ? 16 : timestamp - this.lastTime;
     this.lastTime = timestamp;
 
-    if (this.activeFace && this.faces[this.activeFace]) {
+    if (!this.paused && this.activeFace && this.faces[this.activeFace]) {
       const face = this.faces[this.activeFace];
-      if (face.hd) {
-        this.curW = VFB_HD_W; this.curH = VFB_HD_H; this.curScale = HD_SCALE;
-      } else {
-        this.curW = VFB_STD_W; this.curH = VFB_STD_H; this.curScale = STD_SCALE;
-      }
+      const m = RES_MODES[face.resMode] || RES_MODES[0];
+      this.curW = m.w; this.curH = m.h; this.curScale = m.scale;
+      this.resMode = face.resMode;
 
       const t0 = performance.now();
       face.update(this.frameCount, Math.floor(dt));
@@ -621,7 +698,7 @@ export class PixelitlSimulator {
 
   _getStats() {
     const face = this.activeFace ? this.faces[this.activeFace] : null;
-    const resLabel = face ? (face.hd ? '160x96 (HD)' : '80x48') : '-';
+    const resLabel = face ? (RES_MODES[face.resMode] || RES_MODES[0]).label : '-';
     return {
       frame: this.frameCount,
       resolution: resLabel,
@@ -630,6 +707,7 @@ export class PixelitlSimulator {
       render: this.statRender.toFixed(2),
       total: (this.statUpdate + this.statDraw + this.statRender).toFixed(2),
       memory: face ? (face.memory.buffer.byteLength / 1024).toFixed(0) + 'KB' : '-',
+      paused: this.paused,
     };
   }
 }

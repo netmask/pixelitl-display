@@ -3,6 +3,7 @@
 #include "framebuffer.h"
 #include "board.h"
 #include "http_request.h"
+#include "wifi.h"
 #include "wasm3.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -21,77 +22,70 @@ esp_err_t wasm_init(void) {
     return ESP_OK;
 }
 
-int wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size) {
+int wasm_register_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size) {
     if (s_face_count >= MAX_FACES) {
         ESP_LOGE(TAG, "Max faces reached");
         return -1;
     }
-
     face_t *f = &s_faces[s_face_count];
     memset(f, 0, sizeof(face_t));
     strncpy(f->name, name, sizeof(f->name) - 1);
     f->budget_us = DEFAULT_BUDGET_US;
-    f->state = FACE_STATE_IDLE;
+    f->state    = FACE_STATE_REGISTERED;
+    f->bin_ptr  = wasm_data;
+    f->bin_size = wasm_size;
+    int id = s_face_count++;
+    ESP_LOGI(TAG, "Registered '%s' (id=%d, %u bytes, deferred load)",
+             name, id, wasm_size);
+    return id;
+}
 
-    // Create wasm3 environment and runtime
+esp_err_t wasm_face_ensure_loaded(int face_id) {
+    if (face_id < 0 || face_id >= s_face_count) return ESP_ERR_INVALID_ARG;
+    face_t *f = &s_faces[face_id];
+    // Already running (or in any active state) — nothing to do
+    if (f->state != FACE_STATE_REGISTERED) return ESP_OK;
+    if (!f->bin_ptr || f->bin_size == 0) return ESP_FAIL;
+
     f->env = m3_NewEnvironment();
     if (!f->env) {
         ESP_LOGE(TAG, "m3_NewEnvironment failed");
-        return -1;
+        return ESP_FAIL;
     }
-
     f->runtime = m3_NewRuntime(f->env, WASM_STACK_SIZE, NULL);
     if (!f->runtime) {
         ESP_LOGE(TAG, "m3_NewRuntime failed");
         m3_FreeEnvironment(f->env);
-        return -1;
+        f->env = NULL;
+        return ESP_FAIL;
     }
 
-    // Parse WASM binary
-    M3Result result = m3_ParseModule(f->env, &f->module, wasm_data, wasm_size);
+    M3Result result = m3_ParseModule(f->env, &f->module, f->bin_ptr, f->bin_size);
     if (result) {
-        ESP_LOGE(TAG, "ParseModule '%s': %s", name, result);
-        m3_FreeRuntime(f->runtime);
-        m3_FreeEnvironment(f->env);
-        return -1;
+        ESP_LOGE(TAG, "ParseModule '%s': %s", f->name, result);
+        goto fail;
     }
-
-    // Load module into runtime
     result = m3_LoadModule(f->runtime, f->module);
     if (result) {
-        ESP_LOGE(TAG, "LoadModule '%s': %s", name, result);
+        ESP_LOGE(TAG, "LoadModule '%s': %s", f->name, result);
         m3_FreeModule(f->module);
-        m3_FreeRuntime(f->runtime);
-        m3_FreeEnvironment(f->env);
-        return -1;
+        f->module = NULL;
+        goto fail;
     }
 
-    // Link host functions (must be after LoadModule)
     wasm_host_link_all(f->module);
 
-    // Find required exports
     result = m3_FindFunction(&f->fn_init, f->runtime, "app_init");
-    if (result) {
-        ESP_LOGE(TAG, "'%s' missing app_init: %s", name, result);
-        goto fail;
-    }
+    if (result) { ESP_LOGE(TAG, "'%s' missing app_init: %s", f->name, result); goto fail; }
     result = m3_FindFunction(&f->fn_update, f->runtime, "app_update");
-    if (result) {
-        ESP_LOGE(TAG, "'%s' missing app_update: %s", name, result);
-        goto fail;
-    }
+    if (result) { ESP_LOGE(TAG, "'%s' missing app_update: %s", f->name, result); goto fail; }
     result = m3_FindFunction(&f->fn_draw, f->runtime, "app_draw");
-    if (result) {
-        ESP_LOGE(TAG, "'%s' missing app_draw: %s", name, result);
-        goto fail;
-    }
+    if (result) { ESP_LOGE(TAG, "'%s' missing app_draw: %s", f->name, result); goto fail; }
 
-    // Optional exports (ok if not found)
     m3_FindFunction(&f->fn_on_gesture, f->runtime, "app_on_gesture");
     m3_FindFunction(&f->fn_wifi_ready, f->runtime, "app_wifi_ready");
-    m3_FindFunction(&f->fn_destroy, f->runtime, "app_destroy");
+    m3_FindFunction(&f->fn_destroy,    f->runtime, "app_destroy");
 
-    // Call app_init() — face may call set_resolution() here
     f->res_mode = RES_STANDARD;
     fb_set_resolution(RES_STANDARD);
     g_current_face = f;
@@ -99,24 +93,67 @@ int wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_siz
     result = m3_CallV(f->fn_init);
     g_current_face = NULL;
     if (result) {
-        ESP_LOGW(TAG, "'%s' app_init error: %s", name, result);
+        ESP_LOGW(TAG, "'%s' app_init error: %s", f->name, result);
     }
 
     f->state = FACE_STATE_RUNNING;
-    int id = s_face_count++;
-    ESP_LOGI(TAG, "Loaded '%s' (id=%d, %u bytes)", name, id, wasm_size);
-    return id;
+    f->budget_us = DEFAULT_BUDGET_US;
+    f->overbudget_streak = 0;
+
+    // If WiFi is already connected, fire wifi_ready immediately so faces
+    // that started after the global wifi_ready broadcast still get told.
+    if (f->fn_wifi_ready && wifi_is_connected()) {
+        g_current_face = f;
+        m3_CallV(f->fn_wifi_ready);
+        g_current_face = NULL;
+    }
+
+    ESP_LOGI(TAG, "Loaded '%s' (id=%d) on demand", f->name, face_id);
+    return ESP_OK;
 
 fail:
-    m3_FreeRuntime(f->runtime);
-    m3_FreeEnvironment(f->env);
-    memset(f, 0, sizeof(face_t));
-    return -1;
+    if (f->runtime) { m3_FreeRuntime(f->runtime); f->runtime = NULL; }
+    if (f->env)     { m3_FreeEnvironment(f->env); f->env = NULL; }
+    f->module = NULL;
+    f->fn_init = f->fn_update = f->fn_draw = NULL;
+    f->fn_on_gesture = f->fn_wifi_ready = f->fn_destroy = NULL;
+    return ESP_FAIL;
+}
+
+void wasm_face_unload_runtime(int face_id) {
+    if (face_id < 0 || face_id >= s_face_count) return;
+    face_t *f = &s_faces[face_id];
+    if (f->state == FACE_STATE_REGISTERED) return;   // already unloaded
+
+    if (f->fn_destroy) {
+        g_current_face = f;
+        m3_CallV(f->fn_destroy);
+        g_current_face = NULL;
+    }
+    if (f->runtime) m3_FreeRuntime(f->runtime);
+    if (f->env)     m3_FreeEnvironment(f->env);
+    f->runtime = NULL;
+    f->env     = NULL;
+    f->module  = NULL;
+    f->fn_init = f->fn_update = f->fn_draw = NULL;
+    f->fn_on_gesture = f->fn_wifi_ready = f->fn_destroy = NULL;
+    f->state   = FACE_STATE_REGISTERED;
+    ESP_LOGI(TAG, "Unloaded runtime for '%s' (id=%d)", f->name, face_id);
+}
+
+int wasm_load_face(const char *name, const uint8_t *wasm_data, uint32_t wasm_size) {
+    int id = wasm_register_face(name, wasm_data, wasm_size);
+    if (id < 0) return -1;
+    if (wasm_face_ensure_loaded(id) != ESP_OK) return -1;
+    return id;
 }
 
 int64_t wasm_execute_frame(int face_id, uint32_t frame, uint32_t dt_ms) {
     if (face_id < 0 || face_id >= s_face_count) return -1;
     face_t *f = &s_faces[face_id];
+    if (f->state == FACE_STATE_REGISTERED) {
+        if (wasm_face_ensure_loaded(face_id) != ESP_OK) return -1;
+    }
     if (f->state == FACE_STATE_KILLED) return -1;
 
     fb_set_resolution(f->res_mode);

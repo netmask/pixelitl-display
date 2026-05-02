@@ -4,14 +4,17 @@
 // CRT phosphor oscilloscope aesthetic — 200x120 ultra
 // Seven-segment digits, phosphor trace, grid dots, CRT frame
 
-#define POLL_MS  60000
-#define HIST_MAX 50
+#define POLL_MS    60000
+#define HIST_MAX   50
+#define STALE_MS   (15 * 60 * 1000)   // data older than this is visually stale
+#define REFRESH_COOLDOWN_MS 3000
 
 // ---- State ----
 static float t;
 static int http_h;
 static int poll_timer;
 static int wifi_ok;
+static int refresh_cooldown;   // ms; prevents tap-refresh spam
 static char server_url[160];
 static char resp_buf[256];
 
@@ -195,6 +198,43 @@ static void draw_trace(int gx, int gy, int gw, int gh) {
     }
 }
 
+// ---- Trend arrow glyph (7x7) ----
+// trend codes: 1=rise++, 2=rising, 3=rise+, 4=steady, 5=fall+, 6=falling, 7=fall++
+static void draw_trend_arrow(int x, int y, int trend, unsigned int c) {
+    if (trend < 1 || trend > 7) return;
+    if (trend == 4) {
+        // Flat arrow: ->
+        for (int i = 0; i < 7; i++) set_pixel(x + i, y + 3, c);
+        set_pixel(x + 4, y + 1, c); set_pixel(x + 5, y + 2, c);
+        set_pixel(x + 5, y + 4, c); set_pixel(x + 4, y + 5, c);
+        return;
+    }
+    int rising = trend < 4;
+    // Diagonal shaft: steep for ++, moderate for mid, shallow for +
+    int steepness = (trend == 1 || trend == 7) ? 2 :
+                    (trend == 2 || trend == 6) ? 1 : 0;
+    for (int i = 0; i < 7; i++) {
+        int dy;
+        if (steepness == 2) dy = rising ? (6 - i) : i;
+        else if (steepness == 1) dy = rising ? (5 - i * 3 / 4) : (i * 3 / 4 + 1);
+        else                     dy = rising ? (4 - i / 2) : (i / 2 + 2);
+        if (dy < 0) dy = 0; if (dy > 6) dy = 6;
+        set_pixel(x + i, y + dy, c);
+    }
+    // Arrowhead at the leading end
+    int hx = 6, hy;
+    if (steepness == 2)      hy = rising ? 0 : 6;
+    else if (steepness == 1) hy = rising ? 1 : 5;
+    else                     hy = rising ? 1 : 5;
+    if (rising) {
+        set_pixel(x + hx - 1, y + hy, c); set_pixel(x + hx - 2, y + hy, c);
+        set_pixel(x + hx,     y + hy + 1, c); set_pixel(x + hx,     y + hy + 2, c);
+    } else {
+        set_pixel(x + hx - 1, y + hy, c); set_pixel(x + hx - 2, y + hy, c);
+        set_pixel(x + hx,     y + hy - 1, c); set_pixel(x + hx,     y + hy - 2, c);
+    }
+}
+
 // ---- Decorative EKG blip at bottom ----
 static void draw_ekg_line(int lx, int ly, int lw) {
     unsigned int lc = dim_color(rgb(0, 255, 80), 0.2f);
@@ -229,6 +269,7 @@ void app_init(void) {
     g_valid = 0; g_value = 0; g_trend = 4; g_status = 1;
     hist_n = 0; poll_timer = 0; g_update_ms = 0;
     wifi_ok = 0; http_h = -1;
+    refresh_cooldown = 0;
 }
 
 __attribute__((export_name("app_wifi_ready")))
@@ -240,10 +281,18 @@ void app_wifi_ready(void) {
 __attribute__((export_name("app_update")))
 void app_update(int frame, int dt) {
     t += (float)dt * 0.001f;
+    if (refresh_cooldown > 0) refresh_cooldown -= dt;
     if (!wifi_ok) return;
 
     poll_timer += dt;
     if (poll_timer >= POLL_MS && http_h < 0) {
+        poll_timer = 0;
+        start_fetch();
+    }
+
+    // Manual tap-to-refresh (rate-limited)
+    if (get_gesture() == GESTURE_TAP && http_h < 0 && refresh_cooldown <= 0) {
+        refresh_cooldown = REFRESH_COOLDOWN_MS;
         poll_timer = 0;
         start_fetch();
     }
@@ -378,10 +427,15 @@ void app_draw(void) {
     fill_rect(panel_x, panel_y, panel_w, panel_h, rgb(1, 3, 2));
     draw_rect(panel_x, panel_y, panel_w, panel_h, dim_color(phosphor, 0.05f));
 
+    // Staleness check — dim digits when data is old
+    int data_age_ms = (g_update_ms > 0) ? ((int)millis() - g_update_ms) : 0;
+    int stale = (g_update_ms > 0 && data_age_ms > STALE_MS);
+
     // Value digits
     float pulse = 1.0f;
     if (g_value < 70 || g_value > 250)
         pulse = 0.55f + sinf(t * 5.0f) * 0.45f;
+    if (stale) pulse *= 0.35f;
 
     unsigned int d_on = dim_color(gc, pulse);
     unsigned int d_off = dim_color(gc, 0.04f);
@@ -399,25 +453,30 @@ void app_draw(void) {
     draw_str(dx + 1, dy + 25, "mg/dL", dim_color(phosphor, 0.25f));
 
     // ======== STATUS (overlaid top-right of scope) ========
-    // Trend text
+    // Trend text + arrow glyph
     const char *tnames[] = {"", "RISE ++", "RISING", "RISE +",
                             "STEADY", "FALL +", "FALLING", "FALL ++"};
     if (g_trend >= 1 && g_trend <= 7) {
         int tl = pxl_strlen(tnames[g_trend]);
-        draw_str(sx + sw - tl * PXL_FONT_W - 4, sy + 3, tnames[g_trend],
-                 dim_color(gc, 0.55f));
+        int tx = sx + sw - tl * PXL_FONT_W - 4;
+        unsigned int tc = dim_color(gc, stale ? 0.25f : 0.55f);
+        draw_str(tx, sy + 3, tnames[g_trend], tc);
+        // Arrow glyph immediately left of the text
+        draw_trend_arrow(tx - 9, sy + 3, g_trend, tc);
     }
 
-    // Status label
+    // Status label — override to STALE when data is old
     const char *stxt;
-    if (g_value < 54)       stxt = "! CRITICAL";
-    else if (g_value < 70)  stxt = "LOW";
+    if (stale)               stxt = "STALE";
+    else if (g_value < 54)   stxt = "! CRITICAL";
+    else if (g_value < 70)   stxt = "LOW";
     else if (g_value <= 180) stxt = "IN RANGE";
     else if (g_value <= 250) stxt = "HIGH";
     else                     stxt = "! CRITICAL";
 
     int sl = pxl_strlen(stxt);
-    draw_str(sx + sw - sl * PXL_FONT_W - 4, sy + 13, stxt, dim_color(gc, 0.45f));
+    unsigned int stxt_c = stale ? dim_color(rgb(255, 180, 60), 0.7f) : dim_color(gc, 0.45f);
+    draw_str(sx + sw - sl * PXL_FONT_W - 4, sy + 13, stxt, stxt_c);
 
     // Time since update (top-right, below status)
     if (g_update_ms > 0) {
@@ -474,10 +533,14 @@ void app_draw(void) {
     draw_ekg_line(6, 115, 188);
 
     // ======== CRITICAL ALERT ========
-    if (g_value < 54 || g_value > 300) {
-        float flash = sinf(t * 6.0f);
+    // Flash the frame for any out-of-range value (not just extreme).
+    // Extreme values (<54 or >300) flash faster to raise urgency.
+    if (!stale && (g_value < 70 || g_value > 250)) {
+        int extreme = (g_value < 54 || g_value > 300);
+        float flash = sinf(t * (extreme ? 8.0f : 4.5f));
         if (flash > 0.3f) {
-            unsigned int alert = dim_color(gc, 0.5f);
+            float intensity = extreme ? 0.65f : 0.4f;
+            unsigned int alert = dim_color(gc, intensity);
             draw_line_h(3, 1, 194, alert);
             draw_line_h(3, 118, 194, alert);
             draw_line_v(1, 3, 114, alert);

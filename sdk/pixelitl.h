@@ -144,6 +144,9 @@ extern float ease_out_bounce(float t);
 __attribute__((import_module("env"), import_name("wifi_status")))
 extern int wifi_status(void);
 
+__attribute__((import_module("env"), import_name("wifi_channel")))
+extern int wifi_channel(void);
+
 // --- HTTP (async) ---
 // Status: FREE=0, PENDING=1, IN_PROGRESS=2, DONE=3, ERROR=4
 #define HTTP_FREE        0
@@ -209,6 +212,41 @@ extern int face_get_name(int index, char *dst, int max_len);
 
 __attribute__((import_module("env"), import_name("face_switch")))
 extern void face_switch(int index);
+
+// --- ESP-NOW receive ---
+// The firmware always has the ESP-NOW radio listening; faces only consume
+// packets when they call these functions, so inactive faces cost nothing.
+//
+// `espnow_recv` copies the most recent received packet into `dst` (up to
+// `max_len` bytes) and returns the packet's true byte length, or -1 if no
+// packet has ever been received. Calling it marks the packet as "read";
+// `espnow_has_new` then returns 0 until a new one arrives.
+
+__attribute__((import_module("env"), import_name("espnow_recv")))
+extern int espnow_recv(unsigned char *dst, int max_len);
+
+__attribute__((import_module("env"), import_name("espnow_has_new")))
+extern int espnow_has_new(void);
+
+__attribute__((import_module("env"), import_name("espnow_last_rx_ms")))
+extern long long espnow_last_rx_ms(void);
+
+// Total ESP-NOW packets received since boot. If this stops increasing,
+// the firmware-level receiver has stopped firing — points at radio/PS issues.
+__attribute__((import_module("env"), import_name("espnow_total_rx")))
+extern int espnow_total_rx(void);
+
+// Byte-level packet accessors. Bypass espnow_recv (which has wasm3 array-write
+// quirks at high WASM memory offsets). Returns -1 if no packet / out of range.
+__attribute__((import_module("env"), import_name("espnow_pkt_byte")))
+extern int espnow_pkt_byte(int idx);
+
+__attribute__((import_module("env"), import_name("espnow_pkt_len")))
+extern int espnow_pkt_len(void);
+
+// Mark the current packet as consumed so espnow_has_new returns 0 until next.
+__attribute__((import_module("env"), import_name("espnow_consume")))
+extern void espnow_consume(void);
 
 // ============================================================
 // Convenience helpers (no libc available)

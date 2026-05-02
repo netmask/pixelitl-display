@@ -1,0 +1,12 @@
+_build/
+deps/
+.cache/
+.elixir_ls/
+.git/
+.gitignore
+*.lock~
+*.swp
+fly.toml
+README.md
+.env
+.envrc
