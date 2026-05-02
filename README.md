@@ -33,44 +33,51 @@ A tiny pixel art display powered by WebAssembly. Write animated faces in C or As
 
 ```
 pixelitl-display/
-├── main/                       # ESP32 firmware
-│   ├── main.c                  # App entry, dual-core tasks, face switching
-│   ├── lcd.c                   # RGB LCD driver (no-fb bounce mode)
-│   ├── touch.c                 # GT911 capacitive touch + gestures
-│   ├── framebuffer.c           # Triple-buffered VFB + bounce scaling
-│   ├── graphics.c              # Drawing primitives (circles, text, etc.)
-│   ├── wasm_runtime.c          # wasm3 loader and frame executor
-│   ├── wasm_host.c             # Host API bindings (40+ functions)
-│   ├── native_face.c           # Native C plasma for benchmarking
-│   ├── simd_ops.S              # ESP32-S3 SIMD (PIE) optimizations
-│   ├── board.h                 # Pin definitions and constants
-│   └── faces/*.wasm            # Embedded face binaries
-├── sdk/
-│   ├── pixelitl.h              # C Face SDK header
-│   ├── pixelitl.ts             # AssemblyScript Face SDK
-│   └── examples/               # Example faces
-│       ├── plasma.c            # Sine-based plasma effect
-│       ├── clock.c             # Digital clock with seconds bar
-│       ├── demo.c              # Multi-page animation showcase
-│       ├── hd_demo.c           # HD mode (160x96) demo
-│       ├── buttons.c           # Touch button widget demo
-│       ├── weather.c           # Weather display (HTTP + JSON)
-│       ├── store.c             # Face store (browse & install from studio)
-│       ├── holi.c              # Psychedelic "HOLI" text effect
-│       ├── nyan.c              # Nyan Cat pixel art animation
-│       ├── pong.ts             # Pong game (AssemblyScript)
-│       └── Makefile            # WASM compilation rules
-├── studio/                     # Phoenix LiveView development studio
-│   ├── lib/studio_web/live/
-│   │   ├── editor_live.ex      # Code editor with live preview
-│   │   ├── faces_live.ex       # Face library browser
-│   │   └── simulator_live.ex   # Browser-based WASM simulator
-│   └── lib/studio/compiler/
-│       ├── compiler.ex         # Compilation orchestrator
-│       ├── c_compiler.ex       # C → WASM via clang
-│       └── as_compiler.ex      # AssemblyScript → WASM via asc
-└── components/
-    └── wasm3/                  # wasm3 interpreter (git submodule)
+├── firmware/                   # ESP32-S3 display firmware (the engine)
+│   ├── main/
+│   │   ├── main.c              # app entry, dual-core tasks, face switching
+│   │   ├── board.h             # pin definitions and constants
+│   │   ├── embedded_faces.txt  # which app faces ship in flash (one name per line)
+│   │   ├── faces/              # built .wasm binaries (gitignored, output of `make`)
+│   │   ├── engine/             # WASM runtime, framebuffer, graphics, SIMD, font
+│   │   │   ├── wasm_runtime.c  # wasm3 loader + frame executor + budget enforcer
+│   │   │   ├── wasm_host.c     # host API bindings (40+ functions)
+│   │   │   ├── framebuffer.c   # triple-buffered VFB + bounce scaling
+│   │   │   ├── graphics.c      # drawing primitives
+│   │   │   └── simd_ops.S      # ESP32-S3 SIMD (PIE) optimizations
+│   │   └── drivers/            # peripherals + network
+│   │       ├── lcd.c           # RGB LCD driver (no-fb bounce mode)
+│   │       ├── touch.c         # GT911 capacitive touch + gestures
+│   │       ├── wifi.c          # WiFi STA bring-up
+│   │       ├── http_request.c  # HTTPS client
+│   │       ├── kv_store.c      # NVS key-value store
+│   │       └── esp_now_recv.c  # ESP-NOW receiver
+│   ├── components/wasm3/       # wasm3 interpreter (git submodule)
+│   ├── partitions.csv, sdkconfig*, CMakeLists.txt
+│   └── ...                     # other IDF-managed files
+├── sdk/                        # what apps link against
+│   ├── pixelitl.h              # C SDK
+│   ├── pixelitl.ts             # AssemblyScript SDK
+│   └── face.mk                 # shared wasm32 build rule
+├── apps/                       # real applications
+│   ├── dashboard/              # face + Phoenix service (HN/sprite/dota)
+│   │   ├── face/               # face source + Makefile
+│   │   └── service/            # Phoenix backend, deployable to Fly.io
+│   ├── glucose/face/           # glucose dashboard
+│   ├── store/                  # face library browser (talks to studio)
+│   ├── radar/                  # face + ESP32-WROOM peer
+│   │   ├── face/
+│   │   └── peer/               # IDF project: LD2450 mmWave + ESP-NOW broadcaster
+│   └── weather/face/
+├── demo/                       # engine showcase faces (toys)
+│   ├── plasma/, clock/, nyan/, holi/, buttons/, invaders/, hd_demo/, ultra_demo/
+│   └── pong/                   # AssemblyScript example
+├── studio/                     # Phoenix LiveView dev tool
+│   ├── lib/studio_web/live/    # editor, face library, simulator
+│   └── lib/studio/compiler/    # C and AssemblyScript → WASM
+├── tools/                      # rasterize_sprite.py, rasterize_stdin.py
+├── docs/                       # design docs and implementation plans
+└── Makefile                    # builds every face; recurses into apps/ + demo/
 ```
 
 ## Writing a Face
@@ -234,19 +241,37 @@ brew install llvm lld
 ### Compile WASM Faces
 
 ```bash
-cd sdk/examples
-PATH="/opt/homebrew/opt/llvm/bin:$PATH" make install
+PATH="/opt/homebrew/opt/llvm/bin:$PATH" make
 ```
 
-This compiles all `.c` faces to `.wasm` and copies them to `main/faces/`.
+This compiles every face under `apps/` and `demo/` to `.wasm` and copies them to `firmware/main/faces/`.
+
+To control which faces ship in flash, edit `firmware/main/embedded_faces.txt` (one face name per line).
 
 ### Build & Flash Firmware
 
 ```bash
 source ~/esp/esp-idf/export.sh
+cd firmware
 idf.py build
 idf.py flash
 idf.py monitor    # view serial output
+```
+
+### Build the Radar Peer (optional)
+
+```bash
+cd apps/radar/peer
+idf.py build flash monitor -p /dev/cu.usbserial-...
+```
+
+### Run the Dashboard Service (optional)
+
+```bash
+cd apps/dashboard/service
+mix deps.get
+set -x OPENAI_API_KEY sk-...
+mix run --no-halt
 ```
 
 ## Studio

@@ -29,7 +29,7 @@ Pixelitl is an embedded WebAssembly platform that turns a 4.3" 800×480 touchscr
 | Touch | GT911 capacitive, I²C |
 | Wireless | WiFi 802.11 b/g/n, BLE |
 
-Pin assignments live in `main/board.h`.
+Pin assignments live in `firmware/main/board.h`.
 
 ---
 
@@ -37,37 +37,52 @@ Pin assignments live in `main/board.h`.
 
 ```
 pixelitl-display/
-├── main/                 # ESP32 firmware
-│   ├── main.c            # Boot, FreeRTOS tasks, core pinning
-│   ├── lcd.c             # RGB LCD driver (bounce-buffer mode)
-│   ├── touch.c           # GT911 driver + gesture detection
-│   ├── framebuffer.c     # Triple-buffered VFB + vsync swap + glow scaler
-│   ├── graphics.c        # Drawing primitives & color helpers
-│   ├── wasm_runtime.c    # wasm3 loader, face lifecycle, budget enforcement
-│   ├── wasm_host.c       # Host functions imported by faces
-│   ├── wifi.c            # WiFi station bring-up
-│   ├── http_request.c    # Async HTTP client
-│   ├── kv_store.c        # Per-face NVS key/value store
-│   ├── simd_ops.S        # Xtensa PIE 128-bit SIMD fill/copy
-│   ├── board.h           # Pins + resolution constants
-│   └── faces/            # Embedded .wasm binaries (glucose, store)
-├── components/
-│   └── wasm3/            # wasm3 interpreter (submodule)
+├── firmware/                 # ESP32-S3 display firmware (the engine)
+│   ├── main/
+│   │   ├── main.c            # Boot, FreeRTOS tasks, core pinning
+│   │   ├── board.h           # Pins + resolution constants
+│   │   ├── embedded_faces.txt  # Manifest of which app faces ship in flash
+│   │   ├── faces/            # Built .wasm binaries (gitignored)
+│   │   ├── engine/           # WASM execution platform
+│   │   │   ├── wasm_runtime.c  # wasm3 loader, face lifecycle, budget
+│   │   │   ├── wasm_host.c     # Host functions imported by faces
+│   │   │   ├── framebuffer.c   # Triple-buffered VFB + vsync + glow scaler
+│   │   │   ├── graphics.c      # Drawing primitives & color helpers
+│   │   │   └── simd_ops.S      # Xtensa PIE 128-bit SIMD fill/copy
+│   │   └── drivers/          # Peripherals + network
+│   │       ├── lcd.c           # RGB LCD driver (bounce-buffer mode)
+│   │       ├── touch.c         # GT911 driver + gesture detection
+│   │       ├── wifi.c          # WiFi station bring-up
+│   │       ├── http_request.c  # Async HTTP client
+│   │       ├── kv_store.c      # Per-face NVS key/value store
+│   │       └── esp_now_recv.c  # ESP-NOW receiver
+│   ├── components/wasm3/     # wasm3 interpreter (submodule)
+│   ├── partitions.csv        # Flash partition table
+│   ├── sdkconfig*            # IDF config
+│   └── CMakeLists.txt        # IDF top-level
 ├── sdk/
-│   ├── pixelitl.h        # C SDK for face authors
-│   ├── pixelitl.ts       # AssemblyScript SDK
-│   └── examples/         # Example faces + Makefile
-├── studio/               # Phoenix LiveView development tool (editor + simulator)
-├── simulator/            # Standalone HTML simulator
-├── partitions.csv        # Flash partition table
-└── CMakeLists.txt        # Top-level ESP-IDF project
+│   ├── pixelitl.h            # C SDK for face authors
+│   ├── pixelitl.ts           # AssemblyScript SDK
+│   └── face.mk               # Shared wasm32 build rule
+├── apps/                     # Real applications (each is one product)
+│   ├── dashboard/{face,service}/  # face + Phoenix backend (HN/sprite/dota)
+│   ├── glucose/face/
+│   ├── store/face/
+│   ├── radar/{face,peer}/         # face + ESP32-WROOM peer (LD2450 mmWave)
+│   └── weather/face/
+├── demo/                     # Engine showcase faces (toys)
+│   └── plasma/, clock/, nyan/, holi/, buttons/, invaders/, hd_demo/, ultra_demo/, pong/
+├── studio/                   # Phoenix LiveView dev tool (editor + simulator)
+├── tools/                    # rasterize_sprite.py, rasterize_stdin.py
+├── docs/                     # Design docs and implementation plans
+└── Makefile                  # Walks apps/ + demo/ to build every face
 ```
 
 ---
 
 ## 4. Firmware Architecture
 
-### 4.1 Boot flow (`main/main.c`)
+### 4.1 Boot flow (`firmware/main/main.c`)
 
 1. Init NVS and per-face KV store.
 2. Init framebuffer, WASM host, LCD, touch, WASM runtime.
@@ -152,7 +167,7 @@ m3_ParseModule  →  m3_LoadModule  →  wasm_host_link_all  →  find exports  
 Required exports: `app_init`, `app_update(frame, dt_ms)`, `app_draw`.
 Optional exports: `app_on_gesture(g)`, `app_wifi_ready`, `app_destroy`.
 
-Memory: 128 KB initial, 256 KB max (linker flags in `sdk/examples/Makefile`).
+Memory: 128 KB initial, 256 KB max (linker flags in `sdk/face.mk`).
 
 ### 5.2 Budget enforcement
 
@@ -185,7 +200,16 @@ Exposed to faces via `sdk/pixelitl.h` / `sdk/pixelitl.ts`:
 
 ### 5.4 Building a face
 
-`sdk/examples/Makefile`:
+Each app/demo has a 2-line `Makefile` that includes the shared `sdk/face.mk`:
+
+```makefile
+NAME = my_face
+include ../../../sdk/face.mk     # apps/<name>/face/Makefile
+# or
+include ../../sdk/face.mk        # demo/<name>/Makefile
+```
+
+`sdk/face.mk` runs:
 
 ```
 clang --target=wasm32 -O2 -nostdlib -fno-builtin \
@@ -199,10 +223,12 @@ Apple Clang does not target `wasm32`; install Homebrew `llvm` + `lld`:
 
 ```
 brew install llvm lld
-cd sdk/examples && PATH="/opt/homebrew/opt/llvm/bin:$PATH" make install
+PATH="/opt/homebrew/opt/llvm/bin:$PATH" make    # from repo root
 ```
 
-`make install` copies every built `.wasm` into `main/faces/`.
+The root `Makefile` walks every `apps/*/face` and `demo/*` directory and recurses with the `install` target, copying every built `.wasm` into `firmware/main/faces/`.
+
+To control which faces ship in flash, edit `firmware/main/embedded_faces.txt` (one face name per line). The firmware build reads it and embeds the matching binaries from `firmware/main/faces/`.
 
 ### 5.5 Dynamic face installation
 
@@ -225,23 +251,33 @@ The built-in `store` face queries the Studio API and downloads faces over HTTP:
 
 ---
 
-## 7. Example Faces (`sdk/examples/`)
+## 7. Apps and Demos
 
-| File | Size | Description |
-|------|------|-------------|
-| `plasma.c` | 805 B | Sine-layered plasma with HSV cycling |
-| `clock.c` | 1.2 KB | HH:MM:SS digital clock with blinking colon |
-| `demo.c` | 3.8 KB | Multi-page animation showcase (swipe pages) |
-| `hd_demo.c` | 3.2 KB | 160×96 HD mode demo |
-| `ultra_demo.c` | 2.5 KB | 200×120 Ultra mode demo |
-| `buttons.c` | 4.3 KB | Touch button widgets |
-| `weather.c` | 5.3 KB | JSON weather via HTTP |
-| `pong.ts` | 4.9 KB | AssemblyScript Pong with AI opponent |
-| `invaders.c` | 15 KB | Space Invaders-style shooter |
-| `holi.c` | 1.6 KB | "HOLI" text with plasma + sparkles |
-| `nyan.c` | 3.0 KB | Nyan Cat animation with rainbow trail |
+### Real applications (`apps/`)
 
-Embedded at build time: `faces/glucose.wasm` (default boot face) and `faces/store.wasm` (installer).
+| App | Parts | Description |
+|-----|-------|-------------|
+| `dashboard` | face + service | HN headlines + glucose + DOTA alert; service on Fly.io provides feeds, sprite generation, and alert state. |
+| `glucose` | face | Glucose monitor (Dexcom). |
+| `store` | face | Browse and install faces from the studio over WiFi. |
+| `radar` | face + peer | Visualizes ESP-NOW packets from the LD2450 mmWave peer. |
+| `weather` | face | JSON weather over HTTP. |
+
+### Engine showcase faces (`demo/`)
+
+| File | Description |
+|------|-------------|
+| `plasma` | Sine-layered plasma with HSV cycling |
+| `clock` | HH:MM:SS digital clock with blinking colon |
+| `hd_demo` | 160×96 HD mode demo |
+| `ultra_demo` | 200×120 Ultra mode demo |
+| `buttons` | Touch button widgets |
+| `invaders` | Space Invaders-style shooter |
+| `holi` | "HOLI" text with plasma + sparkles |
+| `nyan` | Nyan Cat animation with rainbow trail |
+| `pong` | AssemblyScript Pong with AI opponent |
+
+Embedded at build time: whichever app faces are listed in `firmware/main/embedded_faces.txt` (today: `dashboard`, `glucose`, `store`, `radar`).
 
 ---
 
@@ -264,6 +300,7 @@ The standalone `simulator/pixelitl-simulator.html` is a dependency-free local va
 
 ```fish
 source ~/esp/esp-idf/export.sh
+cd firmware
 idf.py build flash monitor
 ```
 
@@ -272,7 +309,7 @@ Toolchain pin: ESP-IDF **v6.1-dev** at `~/esp/esp-idf`. Key compatibility notes:
 - wasm3 on Xtensa: define `M3_HAS_TAIL_CALL=0` (not `d_m3NoTailCalls`) to disable `musttail`.
 - RGB LCD API in v6 removes `bits_per_pixel`/`sram_trans_align`/`psram_trans_align`; use `in_color_format`/`out_color_format` + `dma_burst_size`.
 - Use the new `driver/i2c_master.h` (legacy `driver/i2c.h` is EOL in v6).
-- `esp_timer` must be in `main/CMakeLists.txt` `PRIV_REQUIRES`.
+- `esp_timer` must be in `firmware/main/CMakeLists.txt` `PRIV_REQUIRES`.
 - `ESP_RETURN_ON_ERROR` needs `#include "esp_check.h"`.
 
 ESP-DSP is **not** used — it lacks RGB565 ops, and `dsps_mulc_s16` bleeds channels. Manual SIMD is faster for this workload.
@@ -280,9 +317,10 @@ ESP-DSP is **not** used — it lacks RGB565 ops, and `dsps_mulc_s16` bleeds chan
 ### Faces
 
 ```fish
-cd sdk/examples
-PATH="/opt/homebrew/opt/llvm/bin:$PATH" make install
+PATH="/opt/homebrew/opt/llvm/bin:$PATH" make    # from repo root, builds every face
 ```
+
+Per-app/demo Makefiles each include `sdk/face.mk`. To embed a face into firmware, add its name to `firmware/main/embedded_faces.txt`.
 
 ---
 
@@ -311,8 +349,9 @@ PATH="/opt/homebrew/opt/llvm/bin:$PATH" make install
 
 Common extensions:
 
-- **New host function** — add the C implementation in `wasm_host.c`, register it in `wasm_host_link_all`, mirror the signature in `sdk/pixelitl.h`.
-- **New face** — drop a `.c` or `.ts` file in `sdk/examples/`, declare it in the Makefile, run `make install`.
+- **New host function** — add the C implementation in `firmware/main/engine/wasm_host.c`, register it in `wasm_host_link_all`, mirror the signature in `sdk/pixelitl.h`.
+- **New face / app** — `mkdir apps/<name>/face && touch apps/<name>/face/<name>.c apps/<name>/face/Makefile` (with `NAME = <name>` and `include ../../../sdk/face.mk`). Run `make` from repo root. To ship it embedded, add `<name>` to `firmware/main/embedded_faces.txt`.
+- **New demo** — same as above but under `demo/<name>/` with `include ../../sdk/face.mk`. Demos are not normally embedded.
 - **Persistent state** — use `kv_set`/`kv_get`; NVS namespace is per-face.
 - **Network data** — use the async HTTP API; never block in `app_update`/`app_draw`.
 
