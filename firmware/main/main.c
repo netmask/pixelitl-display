@@ -17,15 +17,8 @@
 
 static const char *TAG = "main";
 
-// Embedded face binaries
-extern const uint8_t store_wasm_start[]     asm("_binary_store_wasm_start");
-extern const uint8_t store_wasm_end[]       asm("_binary_store_wasm_end");
-extern const uint8_t glucose_wasm_start[]   asm("_binary_glucose_wasm_start");
-extern const uint8_t glucose_wasm_end[]     asm("_binary_glucose_wasm_end");
-extern const uint8_t dashboard_wasm_start[] asm("_binary_dashboard_wasm_start");
-extern const uint8_t dashboard_wasm_end[]   asm("_binary_dashboard_wasm_end");
-extern const uint8_t radar_wasm_start[]     asm("_binary_radar_wasm_start");
-extern const uint8_t radar_wasm_end[]       asm("_binary_radar_wasm_end");
+// Embedded face binaries — generated from embedded_faces.txt at build time.
+#include "embedded_faces.h"
 
 static int s_active_face = 0;
 static uint32_t s_frame_count = 0;
@@ -139,22 +132,17 @@ void app_main(void) {
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(wasm_init());
 
-    // Register all embedded faces — m3 runtimes are NOT created here. Each
-    // face is brought up only when the user switches to it (and the previous
-    // face's runtime is freed). This keeps internal RAM uncontended for WiFi
-    // and other shared infrastructure.
-    int dashboard_id = wasm_register_face("dashboard",
-        dashboard_wasm_start, dashboard_wasm_end - dashboard_wasm_start);
-    int glucose_id = wasm_register_face("glucose",
-        glucose_wasm_start, glucose_wasm_end - glucose_wasm_start);
-    int store_id = wasm_register_face("store",
-        store_wasm_start, store_wasm_end - store_wasm_start);
-    int radar_id = wasm_register_face("radar",
-        radar_wasm_start, radar_wasm_end - radar_wasm_start);
-    (void)radar_id;
-    if (dashboard_id >= 0) s_active_face = dashboard_id;
-    else if (glucose_id >= 0) s_active_face = glucose_id;
-    else if (store_id >= 0) s_active_face = store_id;
+    // Register all embedded faces from the manifest. m3 runtimes are NOT
+    // created here — each face is brought up only when the user switches
+    // to it (and the previous face's runtime is freed). This keeps internal
+    // RAM uncontended for WiFi and other shared infrastructure.
+    int first_id = -1;
+    for (int i = 0; i < EMBEDDED_FACE_COUNT; i++) {
+        const struct embedded_face_s *ef = &EMBEDDED_FACES[i];
+        int id = wasm_register_face(ef->name, ef->start, ef->end - ef->start);
+        if (id >= 0 && first_id < 0) first_id = id;
+    }
+    if (first_id >= 0) s_active_face = first_id;
 
     ESP_LOGI(TAG, "Loaded %d WASM face(s), active=%d", wasm_face_count(), s_active_face);
     ESP_LOGI(TAG, "Free internal: %u, largest block: %u",

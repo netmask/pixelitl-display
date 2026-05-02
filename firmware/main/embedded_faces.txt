@@ -1,0 +1,4 @@
+dashboard
+glucose
+store
+radar
