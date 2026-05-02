@@ -1,4 +1,41 @@
-.DS_Store
+# Build outputs
+build/
+firmware/build/
+apps/*/peer/build/
+apps/*/service/_build/
+peer/build/
+service/_build/
+studio/_build/
+
+# Compiled face binaries (built artifacts)
+firmware/main/faces/*.wasm
+main/faces/*.wasm
+apps/*/face/*.wasm
+demo/*/*.wasm
+sdk/examples/*.wasm
+
+# IDE / editor caches
+.vscode/.cache/
 .cache/
-DESIGN.md
-build
+**/.cache/
+
+# Stale configs
+sdkconfig.old
+
+# Local DBs / caches
+.dexter.db*
+*.db-shm
+*.db-wal
+
+# macOS
+.DS_Store
+
+# Python venv
+.venv/
+**/.venv/
+
+# Node
+node_modules/
+
+# Logs
+*.log
